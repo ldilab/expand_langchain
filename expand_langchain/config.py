@@ -1,6 +1,7 @@
 from typing import Dict, List, Optional, Tuple, Union
 
 import yaml
+import yaml_include
 from pydantic import BaseModel
 
 
@@ -67,6 +68,7 @@ class Config(BaseModel):
     def __init__(self, **data):
         path = data.get("path")
         if path is not None:
+            yaml.add_constructor("!inc", yaml_include.Constructor())
             with open(path, "r") as f:
                 config = yaml.load(f, Loader=yaml.FullLoader)
 
