@@ -4,6 +4,7 @@ import os
 from expand_langchain.utils.registry import chain_registry
 from langchain_community.utilities.requests import JsonRequestsWrapper
 from langchain_core.runnables import RunnableLambda
+from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="execute")
@@ -12,6 +13,7 @@ def execute_chain(
     target: str,
     **kwargs,
 ):
+    @observe()
     def _func(data):
         result = {}
         result[key] = []

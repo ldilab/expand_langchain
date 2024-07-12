@@ -7,22 +7,14 @@ from pydantic import BaseModel
 
 class SourceConfig(BaseModel):
     name: str
-    path: str
     type: str
-    sort_key: str
     kwargs: Optional[dict] = None
-
-
-class FieldConfig(BaseModel):
-    name: str
-    source: str
-    key: str
 
 
 class DatasetConfig(BaseModel):
     name: str
-    primary_key: str
-    fields: List[FieldConfig]
+    type: str
+    kwargs: dict
 
 
 class EdgeConfig(BaseModel):

@@ -1,8 +1,8 @@
 from typing import Any, List
 
-from langchain_core.runnables import RunnableLambda
-
 from expand_langchain.utils.registry import chain_registry
+from langchain_core.runnables import RunnableLambda
+from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="select")
@@ -15,6 +15,7 @@ def select_chain(
 ):
     func = eval(func)
 
+    @observe()
     def _func(data):
         result = {}
         for d in dst:

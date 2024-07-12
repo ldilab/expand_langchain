@@ -1,8 +1,8 @@
 from typing import List
 
-from langchain_core.runnables import RunnableLambda
-
 from expand_langchain.utils.registry import chain_registry
+from langchain_core.runnables import RunnableLambda
+from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="get_ith")
@@ -12,6 +12,7 @@ def get_ith_chain(
     idx: int = 0,
     **kwargs,
 ):
+    @observe()
     def _func(data):
         result = {}
         result[key] = data[target][idx]

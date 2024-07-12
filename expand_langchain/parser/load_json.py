@@ -9,11 +9,7 @@ from expand_langchain.utils.registry import parser_registry
 @parser_registry(name="load_json")
 def load_json_runner():
     def func_str(input: str):
-        try:
-            result = json.loads(input)
-        except Exception as e:
-            result = input
-
+        result = json.loads(input)
         return result
 
     def func(input):

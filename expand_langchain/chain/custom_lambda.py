@@ -3,6 +3,7 @@ from typing import Any, List
 
 from expand_langchain.utils.registry import chain_registry
 from langchain_core.runnables import RunnableLambda
+from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="custom_lambda")
@@ -12,6 +13,7 @@ def custom_lambda_chain(
     func: str,
     **kwargs,
 ):
+    @observe()
     def _func(data):
         try:
             func_obj = eval(func)

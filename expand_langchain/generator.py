@@ -29,6 +29,7 @@ class Generator(BaseModel):
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
     wandb_mode: str = "offline"  # "online", "offline", "disabled"
+    langfuse_mode: str = "offline"  # "online", "disabled"
     rerun: bool = False
 
     run_name: str = None  # if None, config_path.stem is used
@@ -39,6 +40,8 @@ class Generator(BaseModel):
     output_dir: Path = None
     results_dir: Path = None
     datasets: dict = {}
+    target_dataset: dict = {}
+    example_dataset: dict = {}
     graph: Graph = None
 
     def __init__(self, **data):
@@ -74,6 +77,11 @@ class Generator(BaseModel):
     def _load_datasets(self):
         loader = Loader(config=self.config)
         self.datasets = loader.run().result
+        self.target_dataset = self.datasets.get(self.target_dataset_name, {})
+        self.example_dataset = self.datasets.get(self.example_dataset_name, {})
+        del self.datasets[self.target_dataset_name]
+        if self.example_dataset_name in self.datasets:
+            del self.datasets[self.example_dataset_name]
 
     def _init_wandb(self):
         wandb.require("core")
@@ -91,11 +99,11 @@ class Generator(BaseModel):
 
         wandb.config.update(self.config.model_dump())
 
-
     def _compile_graph(self):
         self.graph = Graph(
             config=self.config.graph,
-            examples=self.datasets.get(self.example_dataset_name, {}),
+            examples=self.example_dataset,
+            etc_datasets=self.datasets,
         ).run()
 
     def run(
@@ -103,7 +111,7 @@ class Generator(BaseModel):
         n: Optional[int] = None,
         ids: Optional[list] = None,
     ):
-        targets = self.datasets[self.target_dataset_name]
+        targets = self.target_dataset
 
         if n is not None:
             targets = {k: v for k, v in list(targets.items())[:n]}
@@ -135,46 +143,29 @@ class Generator(BaseModel):
         """
         Run the target and save the result as json file
         """
-
-        def hide_inputs(inputs):
-            if isinstance(inputs, dict):
-                keys = set(inputs.keys())
-                if keys == {"input"}:
-                    return {}
-                elif keys == {"args", "kwargs"}:
-                    return {}
-                else:
-                    return inputs
-            elif isinstance(inputs, list):
-                return {}
-
-        def hide_outputs(outputs):
-            if isinstance(outputs, dict):
-                keys = set(outputs.keys())
-                if keys == {"output"}:
-                    return {}
-                else:
-                    return outputs
-            elif isinstance(outputs, list):
-                return {}
-
-        path = self.results_dir / f"{id}.json"
+        path = self.results_dir / f"{id.replace('/', '_')}.json"
         if path.exists() and not self.rerun:
             logging.info(f"{id} already exists. Skipping...")
             result = json.loads(path.read_text())
 
         else:
-            result = await self.graph.ainvoke([target])
+            if self.langfuse_mode == "online":
+                from langfuse.callback import CallbackHandler
 
-        self._save_json(id, result)
-        self._save_files(id, result)
+                langfuse_handler = CallbackHandler()
+                config = {"callbacks": [langfuse_handler]}
+            else:
+                config = {}
 
+            result = await self.graph.ainvoke([target], config=config)
+        self._save_json(id.replace("/", "_"), result)
+        self._save_files(id.replace("/", "_"), result)
 
     def _save_json(self, id: str, result: dict):
         """
         Save result as json file
         """
-        with open(f"{self.output_dir}/results/{id}.json", "w") as f:
+        with open(self.results_dir / f"{id}.json", "w") as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
 
     def _save_files(self, id: str, result: str):

@@ -2,17 +2,18 @@ import asyncio
 from typing import Dict, List, Optional
 
 import networkx as nx
-from langchain_core.runnables import RunnableLambda
-from langgraph.graph import StateGraph
-from pydantic import BaseModel
-
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
 from expand_langchain.utils.registry import chain_registry, transition_registry
+from langchain_core.runnables import RunnableLambda
+from langfuse.decorators import langfuse_context, observe
+from langgraph.graph import StateGraph
+from pydantic import BaseModel
 
 
 class Graph(BaseModel):
     config: GraphConfig
-    examples: dict
+    examples: dict = {}
+    etc_datasets: dict = {}
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -26,6 +27,7 @@ class Graph(BaseModel):
             chain = node_factory(
                 configs=node.chains,
                 examples=self.examples,
+                etc_datasets=self.etc_datasets,
             )
 
             builder.add_node(node.name, chain)
@@ -47,7 +49,8 @@ class Graph(BaseModel):
 
 def node_factory(
     configs: List[ChainConfig],
-    examples: dict,
+    examples: dict = {},
+    etc_datasets: dict = {},
 ):
     nx_graph = nx.DiGraph()
     for config in configs:
@@ -64,6 +67,7 @@ def node_factory(
             key_map=key_map,
             type=type,
             examples=examples,
+            etc_datasets=etc_datasets,
             **kwargs,
         )
         nx_graph.add_node(name, chain=chain)
@@ -83,7 +87,8 @@ def node_chain(
     input_keys: List[str],
     key_map: Dict[str, str],
     type: str,
-    examples: Optional[dict] = None,
+    examples: dict = {},
+    etc_datasets: dict = {},
     **kwargs,
 ):
     chain = chain_registry[type](
@@ -96,7 +101,7 @@ def node_chain(
     async def _func(data):
         cur_data = {}
         for key in input_keys:
-            cur_data[key_map[key]] = data[key]
+            cur_data[key_map[key]] = data.get(key, None) or etc_datasets[key]
 
         return await chain.ainvoke(cur_data)
 
@@ -104,9 +109,10 @@ def node_chain(
 
 
 def graph_chain(graph: nx.DiGraph):
+    @observe()
     async def run_node(chain, inputs, results, tasks, lock):
         if chain.name in results:
-            return
+            return results[chain.name]
 
         parents = list(graph.predecessors(chain.name))
         new_tasks = []
@@ -125,12 +131,17 @@ def graph_chain(graph: nx.DiGraph):
         if new_tasks:
             await asyncio.gather(*new_tasks)
 
-        new_result = await chain.ainvoke({**inputs, **results})
+        langfuse_handler = langfuse_context.get_current_langchain_handler()
+
+        new_result = await chain.ainvoke(
+            {**inputs, **results}, config={"callbacks": [langfuse_handler]}
+        )
         async with lock:
             results.update(new_result)
 
-        return
+        return new_result
 
+    @observe()
     async def _func(data: List[dict]):
         inputs = {}
         for input in data:
