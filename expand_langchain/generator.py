@@ -9,7 +9,6 @@ from typing import Optional
 from expand_langchain.config import Config
 from expand_langchain.graph import Graph
 from expand_langchain.loader import Loader
-from langsmith import Client, trace
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
 
@@ -30,7 +29,6 @@ class Generator(BaseModel):
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
     wandb_mode: str = "offline"  # "online", "offline", "disabled"
-    langsmith_mode: str = "disabled"  # "online", "disabled"
     rerun: bool = False
 
     run_name: str = None  # if None, config_path.stem is used
@@ -51,7 +49,6 @@ class Generator(BaseModel):
         self._load_api_keys()
         self._load_datasets()
         self._init_wandb()
-        self._init_langsmith()
         self._compile_graph()
 
     def _load_config(self):
@@ -94,14 +91,6 @@ class Generator(BaseModel):
 
         wandb.config.update(self.config.model_dump())
 
-    def _init_langsmith(self):
-        if self.langsmith_mode == "online":
-            logging.info("Langsmith mode is online")
-            os.environ["LANGCHAIN_TRACING_V2"] = "true"
-            os.environ["LANGCHAIN_PROJECT"] = self.run_name
-        else:
-            os.environ["LANGCHAIN_TRACING_V2"] = ""
-            os.environ["LANGCHAIN_PROJECT"] = ""
 
     def _compile_graph(self):
         self.graph = Graph(
@@ -169,18 +158,6 @@ class Generator(BaseModel):
             elif isinstance(outputs, list):
                 return {}
 
-        client = Client(
-            hide_inputs=hide_inputs,
-            hide_outputs=hide_outputs,
-        )
-
-        if self.langsmith_mode == "online":
-            rt = trace(
-                name="ROOT",
-                run_type="chain",
-                inputs=target,
-                client=client,
-            )
         path = self.results_dir / f"{id}.json"
         if path.exists() and not self.rerun:
             logging.info(f"{id} already exists. Skipping...")
@@ -191,8 +168,6 @@ class Generator(BaseModel):
 
         self._save_json(id, result)
         self._save_files(id, result)
-        if self.langsmith_mode == "online":
-            rt.end(outputs=result)
 
 
     def _save_json(self, id: str, result: dict):

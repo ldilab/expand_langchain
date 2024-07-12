@@ -1,7 +1,6 @@
 import itertools
 from typing import Any, List
 
-from expand_langchain.utils.custom_trace import traceable
 from expand_langchain.utils.registry import chain_registry
 from langchain_core.runnables import RunnableLambda
 

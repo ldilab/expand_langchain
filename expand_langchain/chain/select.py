@@ -2,7 +2,6 @@ from typing import Any, List
 
 from langchain_core.runnables import RunnableLambda
 
-from expand_langchain.utils.custom_trace import traceable
 from expand_langchain.utils.registry import chain_registry
 
 

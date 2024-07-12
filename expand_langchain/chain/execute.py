@@ -1,7 +1,6 @@
 import asyncio
 import os
 
-from expand_langchain.utils.custom_trace import traceable
 from expand_langchain.utils.registry import chain_registry
 from langchain_community.utilities.requests import JsonRequestsWrapper
 from langchain_core.runnables import RunnableLambda
@@ -13,7 +12,6 @@ def execute_chain(
     target: str,
     **kwargs,
 ):
-    @traceable
     def _func(data):
         result = {}
         result[key] = []

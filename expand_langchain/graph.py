@@ -7,7 +7,6 @@ from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
-from expand_langchain.utils.custom_trace import traceable
 from expand_langchain.utils.registry import chain_registry, transition_registry
 
 
@@ -94,7 +93,6 @@ def node_chain(
         **kwargs,
     )
 
-    @traceable(hide=True)
     async def _func(data):
         cur_data = {}
         for key in input_keys:
@@ -106,7 +104,6 @@ def node_chain(
 
 
 def graph_chain(graph: nx.DiGraph):
-    @traceable(hide=True)
     async def run_node(chain, inputs, results, tasks, lock):
         if chain.name in results:
             return
@@ -134,7 +131,6 @@ def graph_chain(graph: nx.DiGraph):
 
         return
 
-    @traceable(hide=True)
     async def _func(data: List[dict]):
         inputs = {}
         for input in data:

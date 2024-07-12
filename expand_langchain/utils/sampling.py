@@ -2,8 +2,6 @@ from typing import Any, List
 
 from langchain_core.runnables import Runnable, RunnableConfig, RunnableLambda
 
-from expand_langchain.utils.custom_trace import traceable
-
 
 def sampling_chain(
     chain: Runnable,
@@ -11,7 +9,6 @@ def sampling_chain(
     flatten: bool = False,
     **kwargs,
 ):
-    @traceable(hide=True)
     def divide_dict(d: dict) -> List[dict]:
         input_keys = list(d.keys())
 
@@ -40,7 +37,6 @@ def sampling_chain(
 
         return result
 
-    @traceable(hide=True)
     async def parallel_run(inputs: list, config: RunnableConfig):
         batch = []
         for input in inputs:
@@ -55,7 +51,7 @@ def sampling_chain(
                 result[k] = [r[k] for r in response]
                 if flatten and isinstance(result[k][0], list):
                     result[k] = [item for sublist in result[k] for item in sublist]
-                    
+
             return result
         else:
             return response

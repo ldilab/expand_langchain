@@ -3,7 +3,6 @@ from typing import List, Optional
 from langchain_core.runnables import RunnableLambda
 
 from expand_langchain.chain.llm import llm_chain
-from expand_langchain.utils.custom_trace import traceable
 from expand_langchain.utils.parser import parser_chain
 from expand_langchain.utils.registry import chain_registry
 from expand_langchain.utils.sampling import sampling_chain
@@ -16,7 +15,6 @@ def cot_chain(
     n=1,
     **kwargs,
 ):
-    @traceable(hide=True)
     async def _func(data):
         chain = llm_chain(examples=list(examples.values()), **kwargs)
         parser = parser_chain(**kwargs)
