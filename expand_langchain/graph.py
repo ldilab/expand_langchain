@@ -98,12 +98,13 @@ def node_chain(
         **kwargs,
     )
 
-    async def _func(data):
+    @observe()
+    async def _func(data, config={}):
         cur_data = {}
         for key in input_keys:
             cur_data[key_map[key]] = data.get(key, None) or etc_datasets[key]
 
-        return await chain.ainvoke(cur_data)
+        return await chain.ainvoke(cur_data, config=config)
 
     return RunnableLambda(_func, name=key)
 
