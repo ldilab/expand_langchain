@@ -6,14 +6,15 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Optional
 
-from expand_langchain.config import Config
-from expand_langchain.graph import Graph
-from expand_langchain.loader import Loader
+import wandb
+import yaml
 from langchain_core.documents import Document
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
 
-import wandb
+from expand_langchain.config import Config
+from expand_langchain.graph import Graph
+from expand_langchain.loader import Loader
 
 """registry """
 from expand_langchain.utils import registry  # isort:skip
@@ -160,6 +161,7 @@ class Generator(BaseModel):
 
             result = await self.graph.ainvoke([target], config=config)
         self._save_json(id.replace("/", "_"), result)
+        self._save_yaml(id.replace("/", "_"), result)
         self._save_files(id.replace("/", "_"), result)
 
     def _save_json(self, id: str, result: dict):
@@ -168,6 +170,13 @@ class Generator(BaseModel):
         """
         with open(self.results_dir / f"{id}.json", "w") as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
+    
+    def _save_yaml(self, id: str, result: dict):
+        """
+        Save result as yaml file
+        """
+        with open(self.results_dir / f"{id}.yaml", "w") as f:
+            yaml.dump(result, f, default_style='|', default_flow_style=False, sort_keys=False)
 
     def _save_files(self, id: str, result: str):
         output_dir = self.results_dir / id
