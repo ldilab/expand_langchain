@@ -14,6 +14,7 @@ class SourceConfig(BaseModel):
 class DatasetConfig(BaseModel):
     name: str
     type: str
+    remove: bool = False
     kwargs: dict
 
 

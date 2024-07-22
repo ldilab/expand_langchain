@@ -7,5 +7,6 @@ from expand_langchain.chain import (
     get_ith,
     llm,
     passthrough,
+    retriever,
     select,
 )

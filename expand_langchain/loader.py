@@ -2,10 +2,12 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 import psycopg2
 import yaml
 from datasets import Dataset, load_dataset
+from elasticsearch import Elasticsearch, helpers
 from expand_langchain.config import Config, DatasetConfig, SourceConfig
 from pydantic import BaseModel
 from tqdm import tqdm
@@ -15,23 +17,33 @@ logger = logging.getLogger(__name__)
 
 class Loader(BaseModel):
     config: Config = None
-    path: str = None
+    config_path: str = None
+    api_keys_path: str = "api_keys.json"
 
-    result: dict = None
+    result: Any = None
 
     def __init__(self, **data):
         super().__init__(**data)
 
-        if self.path is not None:
-            self.config = Config(path=self.path)
+        self._load_config()
+        self._load_api_keys()
+
+    def _load_config(self):
+        if self.config_path is not None:
+            self.config = Config(path=self.config_path)
         elif self.config is None:
             raise ValueError("Either config_path or config should be provided")
         else:
             pass
 
+    def _load_api_keys(self):
+        api_keys = json.loads(Path(self.api_keys_path).read_text())
+        for k, v in api_keys.items():
+            os.environ[k] = v
+
     def run(self):
         sources = self.load_sources()
-        self.result = self.load_datasets(sources)
+        self.result = self._load_datasets(sources)
 
         return self
 
@@ -72,22 +84,35 @@ class Loader(BaseModel):
 
         return sources
 
-    def load_datasets(self, sources):
+    def _load_datasets(self, sources):
         datasets = {}
         for dataset in self.config.dataset:
             dataset: DatasetConfig
 
             name = dataset.name
             if dataset.type == "dict":
-                datasets[name] = _load_dict(sources, **dataset.kwargs)
+                result = _load_dict(sources, **dataset.kwargs)
 
-            elif dataset.type == "schema":
-                datasets[name] = _load_schema(sources, **dataset.kwargs)
+            elif dataset.type == "db-schema":
+                if dataset.remove and not dataset.kwargs.get("rerun"):
+                    continue
+                result = _load_db_schema(sources, **dataset.kwargs)
+
+            elif dataset.type == "db-value":
+                if dataset.remove and not dataset.kwargs.get("rerun"):
+                    continue
+                result = _load_db_value(sources, **dataset.kwargs)
 
             else:
                 raise ValueError(f"Unknown dataset type: {dataset.type}")
 
+            if not dataset.remove:
+                datasets[name] = result
+
         return datasets
+
+    def exit(self):
+        pass
 
 
 def _load_dict(sources, primary_key, fields):
@@ -104,7 +129,7 @@ def _load_dict(sources, primary_key, fields):
     return result
 
 
-def _load_schema(sources_dict, sources):
+def _load_db_schema(sources_dict, sources, index_name, rerun=False):
     results = []
     for key in sources:
         conn = sources_dict[key]
@@ -192,5 +217,142 @@ def _load_schema(sources_dict, sources):
 
         result = {key: tables}
         results.append(result)
+
+    if rerun:
+        client = Elasticsearch(
+            os.getenv("ELASTICSEARCH_URL"),
+            api_key=os.getenv("ELASTICSEARCH_API_KEY"),
+        )
+
+        index_name = index_name.lower()
+        client.indices.delete(index=index_name, ignore=[400, 404])
+        client.indices.create(index=index_name)
+
+        for result in results:
+            for db_id, tables in result.items():
+
+                def generate_docs():
+                    for table in tables:
+                        yield {
+                            "_index": index_name,
+                            "_source": {
+                                "db_id": db_id,
+                                "table": table.get("name"),
+                                "table_description": table.get("description"),
+                                "column": "*",
+                                "column_description": "",
+                                "type": "",
+                            },
+                        }
+                        for column in table.get("columns"):
+                            yield {
+                                "_index": index_name,
+                                "_source": {
+                                    "db_id": db_id,
+                                    "table": table.get("name"),
+                                    "table_description": table.get("description"),
+                                    "column": column.get("name"),
+                                    "column_description": column.get("description"),
+                                    "type": column.get("type"),
+                                },
+                            }
+
+                helpers.bulk(client, generate_docs())
+
+    return results
+
+
+def _load_db_value(sources_dict, sources, index_name, rerun=False):
+    results = []
+    for key in sources:
+        conn = sources_dict[key]
+        table_names = []
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    n.nspname AS schema,
+                    c.relname AS table
+                FROM
+                    pg_catalog.pg_class c
+                JOIN
+                    pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                WHERE
+                    c.relkind = 'r' -- only tables
+                    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY
+                    n.nspname, c.relname;
+                """
+            )
+            for schema, table in cur.fetchall():
+                table_names.append(f"{schema}.{table}")
+
+        data_tuples = []
+        for table_name in table_names:
+            schema, table = table_name.split(".")
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT
+                        n.nspname AS schema,
+                        c.relname AS table,
+                        a.attname AS column
+                    FROM
+                        pg_catalog.pg_class c
+                    JOIN
+                        pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    JOIN
+                        pg_catalog.pg_attribute a ON a.attrelid = c.oid
+                    WHERE
+                        c.relkind = 'r' -- only tables
+                        AND a.attnum > 0
+                        AND NOT a.attisdropped
+                        AND n.nspname = %s
+                        AND c.relname = %s
+                    ORDER BY
+                        a.attnum;""",
+                    (schema, table),
+                )
+
+                columns = cur.fetchall()
+
+                for schema_name, table_name, column_name in columns:
+                    cur.execute(
+                        f'SELECT "{column_name}" FROM "{schema_name}"."{table_name}"'
+                    )
+                    values = cur.fetchall()
+                    values = set(
+                        [(table_name, column_name, value[0]) for value in values]
+                    )
+                    data_tuples.extend(values)
+
+        result = {key: data_tuples}
+        results.append(result)
+
+    if rerun:
+        client = Elasticsearch(
+            os.getenv("ELASTICSEARCH_URL"),
+            api_key=os.getenv("ELASTICSEARCH_API_KEY"),
+        )
+
+        index_name = index_name.lower()
+        client.indices.create(index=index_name, ignore=400)
+
+        for result in results:
+            for db_id, data_tuples in result.items():
+
+                def generate_docs():
+                    for table_name, column_name, value in data_tuples:
+                        yield {
+                            "_index": index_name,
+                            "_source": {
+                                "db_id": db_id,
+                                "table": table_name,
+                                "column": column_name,
+                                "value": value,
+                            },
+                        }
+
+                helpers.bulk(client, generate_docs())
 
     return results

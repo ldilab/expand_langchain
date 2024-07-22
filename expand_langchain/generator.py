@@ -9,6 +9,7 @@ from typing import Optional
 from expand_langchain.config import Config
 from expand_langchain.graph import Graph
 from expand_langchain.loader import Loader
+from langchain_core.documents import Document
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
 
@@ -186,6 +187,11 @@ class Generator(BaseModel):
             elif isinstance(result, dict):
                 for k, v in result.items():
                     _rec_save_files(v, dir / key, k)
+            elif isinstance(result, Document):
+                file = dir / f"{key}.txt"
+                with open(file, "w") as f:
+                    f.write(result.to_json())
+                wandb.save(file, base_path=self.results_dir, policy="now")
             else:
                 file = dir / f"{key}.json"
                 with open(file, "w") as f:

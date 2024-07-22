@@ -17,8 +17,6 @@ def execute_chain(
     def _func(data):
         result = {}
         result[key] = []
-
-        result[key] = []
         for input in data[target]:
             if isinstance(input, str):
                 response = JsonRequestsWrapper().post(
