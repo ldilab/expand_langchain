@@ -33,6 +33,7 @@ class Generator(BaseModel):
     wandb_mode: str = "offline"  # "online", "offline", "disabled"
     langfuse_mode: str = "offline"  # "online", "disabled"
     rerun: bool = False
+    max_concurrency: int = 5
 
     run_name: str = None  # if None, config_path.stem is used
     config_path: Path = None
@@ -131,8 +132,9 @@ class Generator(BaseModel):
         targets: dict,
     ):
         tasks = []
+        sem = asyncio.Semaphore(self.max_concurrency)
         for id, target in targets.items():
-            task = self._run_one(id, target)
+            task = self._run_one(id, target, sem)
             tasks.append(task)
 
         await tqdm_asyncio.gather(*tasks)
@@ -141,6 +143,7 @@ class Generator(BaseModel):
         self,
         id: str,
         target: dict,
+        sem: asyncio.Semaphore,
     ):
         """
         Run the target and save the result as json file
@@ -151,15 +154,17 @@ class Generator(BaseModel):
             result = json.loads(path.read_text())
 
         else:
-            if self.langfuse_mode == "online":
-                from langfuse.callback import CallbackHandler
+            async with sem:
+                if self.langfuse_mode == "online":
+                    from langfuse.callback import CallbackHandler
 
-                langfuse_handler = CallbackHandler()
-                config = {"callbacks": [langfuse_handler]}
-            else:
-                config = {}
+                    langfuse_handler = CallbackHandler()
+                    config = {"callbacks": [langfuse_handler]}
+                else:
+                    config = {}
 
-            result = await self.graph.ainvoke([target], config=config)
+                result = await self.graph.ainvoke([target], config=config)
+        
         self._save_json(id.replace("/", "_"), result)
         self._save_yaml(id.replace("/", "_"), result)
         self._save_files(id.replace("/", "_"), result)
