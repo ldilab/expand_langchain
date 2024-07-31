@@ -30,8 +30,8 @@ class Generator(BaseModel):
     api_keys_path: str = "api_keys.json"
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
-    wandb_mode: str = "offline"  # "online", "offline", "disabled"
-    langfuse_mode: str = "offline"  # "online", "disabled"
+    wandb_on: bool = False
+    langfuse_on: bool = False
     rerun: bool = False
     max_concurrency: int = 5
 
@@ -89,11 +89,11 @@ class Generator(BaseModel):
     def _init_wandb(self):
         wandb.require("core")
 
-        if self.wandb_mode == "online":
+        if self.wandb_on:
             logging.info("Wandb mode is online")
 
         wandb.init(
-            mode=self.wandb_mode,
+            mode="online",
             entity=os.environ.get("WANDB_ENTITY", None),
             project=os.environ.get("WANDB_PROJECT", None),
             name=self.config_path.stem,
@@ -155,7 +155,7 @@ class Generator(BaseModel):
 
         else:
             async with sem:
-                if self.langfuse_mode == "online":
+                if self.langfuse_on:
                     from langfuse.callback import CallbackHandler
 
                     langfuse_handler = CallbackHandler()
