@@ -1,19 +1,16 @@
 import logging
 from typing import Dict, List
 
-from langchain_core.runnables import RunnableLambda
-
 from expand_langchain.utils.registry import parser_registry
+from langchain_core.runnables import RunnableLambda
 
 
 @parser_registry(name="load_python_obj")
 def load_python_obj_runner():
     def func_str(input: str):
-        try:
-            result = eval(input)
-        except Exception as e:
-            logging.error(f"Failed to eval {input} with error {e}")
-            raise e
+        local_scope = {}
+        exec(input, local_scope)
+        result = local_scope.get("result")
 
         return result
 

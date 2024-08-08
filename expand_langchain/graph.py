@@ -1,11 +1,10 @@
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
 from expand_langchain.utils.registry import chain_registry, transition_registry
 from langchain_core.runnables import RunnableLambda
-from langfuse.decorators import langfuse_context, observe
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
@@ -98,7 +97,6 @@ def node_chain(
         **kwargs,
     )
 
-    @observe()
     async def _func(data, config={}):
         cur_data = {}
         for key in input_keys:
@@ -110,8 +108,7 @@ def node_chain(
 
 
 def graph_chain(graph: nx.DiGraph):
-    @observe()
-    async def run_node(chain, inputs, results, tasks, lock):
+    async def run_node(chain, inputs, results, tasks, lock, config):
         if chain.name in results:
             return results[chain.name]
 
@@ -122,7 +119,7 @@ def graph_chain(graph: nx.DiGraph):
             async with lock:
                 if parent not in tasks:
                     task = asyncio.create_task(
-                        run_node(_chain, inputs, results, tasks, lock)
+                        run_node(_chain, inputs, results, tasks, lock, config)
                     )
                     tasks[parent] = task
                 else:
@@ -132,18 +129,13 @@ def graph_chain(graph: nx.DiGraph):
         if new_tasks:
             await asyncio.gather(*new_tasks)
 
-        langfuse_handler = langfuse_context.get_current_langchain_handler()
-
-        new_result = await chain.ainvoke(
-            {**inputs, **results}, config={"callbacks": [langfuse_handler]}
-        )
+        new_result = await chain.ainvoke({**inputs, **results}, config=config)
         async with lock:
             results.update(new_result)
 
         return new_result
 
-    @observe()
-    async def _func(data: List[dict]):
+    async def _func(data: List[dict], config={}):
         inputs = {}
         for input in data:
             inputs.update(input)
@@ -156,7 +148,7 @@ def graph_chain(graph: nx.DiGraph):
             async with lock:
                 if chain.name not in tasks:
                     task = asyncio.create_task(
-                        run_node(chain, inputs, results, tasks, lock)
+                        run_node(chain, inputs, results, tasks, lock, config)
                     )
                     tasks[chain.name] = task
 

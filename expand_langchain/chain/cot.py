@@ -15,18 +15,14 @@ def cot_chain(
     n=1,
     **kwargs,
 ):
-    @observe()
-    async def _func(data):
+    async def _func(data, config={}):
         chain = llm_chain(
             examples=list(examples.values()),
             **kwargs,
         )
         parser = parser_chain(**kwargs)
-
-        langfuse_handler = langfuse_context.get_current_langchain_handler()
-        result = await chain.ainvoke(data, config={"callbacks": [langfuse_handler]})
-
-        parsed_result = parser.invoke(result, config={"callbacks": [langfuse_handler]})
+        result = await chain.ainvoke(data, config=config)
+        parsed_result = parser.invoke(result, config=config)
 
         return {
             f"{key}_raw": result,

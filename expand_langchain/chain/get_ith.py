@@ -12,8 +12,7 @@ def get_ith_chain(
     idx: int = 0,
     **kwargs,
 ):
-    @observe()
-    def _func(data):
+    def _func(data, config={}):
         result = {}
         result[key] = data[target][idx]
 

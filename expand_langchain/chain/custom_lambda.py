@@ -13,8 +13,7 @@ def custom_lambda_chain(
     func: str,
     **kwargs,
 ):
-    @observe()
-    def _func(data):
+    def _func(data, config={}):
         try:
             func_obj = eval(func)
         except:

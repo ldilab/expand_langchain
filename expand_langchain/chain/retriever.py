@@ -4,7 +4,6 @@ from typing import List
 from elasticsearch import helpers as es_helpers
 from expand_langchain.utils.registry import chain_registry
 from langchain_core.runnables import RunnableLambda
-from langfuse.decorators import observe
 
 
 @chain_registry(name="retriever")
@@ -17,8 +16,7 @@ def retriever_chain(
     b: float = 0.75,
     **kwargs,
 ):
-    @observe()
-    def _func(data):
+    def _func(data, config={}):
         if method == "elasticsearch":
             from elasticsearch import Elasticsearch
 

@@ -1,41 +1,43 @@
-import asyncio
 import os
+from typing import List, Optional
 
 from expand_langchain.utils.registry import chain_registry
 from langchain_community.utilities.requests import JsonRequestsWrapper
 from langchain_core.runnables import RunnableLambda
-from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="execute")
 def execute_chain(
     key: str,
-    target: str,
+    code_key: str,
+    testcase_key: Optional[str] = None,
+    stdin_key: Optional[str] = None,
     **kwargs,
 ):
-    @observe()
-    def _func(data):
+    def _func(data, config={}):
         result = {}
         result[key] = []
-        for input in data[target]:
-            if isinstance(input, str):
+        for target, testcase in zip(data[code_key], data[testcase_key]):
+            if isinstance(target, str):
                 response = JsonRequestsWrapper().post(
                     os.environ["CODEEXEC_ENDPOINT"],
                     data={
-                        "code": input,
+                        "code": target,
+                        "stdin": testcase[stdin_key],
                         **kwargs,
                     },
                 )
                 output = response["output"]
                 result[key].append(output)
 
-            elif isinstance(input, list):
+            elif isinstance(target, list):
                 outputs = []
-                for _input in input:
+                for _target, _testcase in zip(target, testcase):
                     response = JsonRequestsWrapper().post(
                         os.environ["CODEEXEC_ENDPOINT"],
                         data={
-                            "code": _input,
+                            "code": _target,
+                            "stdin": _testcase[stdin_key],
                             **kwargs,
                         },
                     )

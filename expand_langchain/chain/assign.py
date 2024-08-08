@@ -11,8 +11,7 @@ def assign_chain(
     input_keys: List[str],
     **kwargs,
 ):
-    @observe()
-    def _func(data):
+    def _func(data, config={}):
         result = {}
         result[key] = data[input_keys[0]]
 
