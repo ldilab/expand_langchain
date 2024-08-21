@@ -150,12 +150,20 @@ class Generator(BaseModel):
         """
         Run the target and save the result as json file
         """
+        done = False
         path = self.results_dir / f"{id.replace('/', '_')}.json"
         if path.exists() and not self.rerun:
             logging.info(f"{id} already exists. Skipping...")
-            result = json.loads(path.read_text())
+            try:
+                result = json.loads(path.read_text())
+                if "error" in result[0]:
+                    raise Exception("Error in previous run")
+                done = True
+            except Exception as e:
+                logging.error(f"Error in loading {id}")
+                logging.error(format_exc())
 
-        else:
+        if not done:
             async with sem:
                 if self.langfuse_on:
                     from langfuse.callback import CallbackHandler
@@ -167,7 +175,9 @@ class Generator(BaseModel):
 
                 try:
                     result = await self.graph.ainvoke([target], config=config)
+                    logging.info(f"Done: {id}")
                 except Exception as e:
+                    logging.error(f"Error in running {id}")
                     result = [{"error": format_exc()}]
 
         self._save_json(id.replace("/", "_"), result)
@@ -214,10 +224,13 @@ class Generator(BaseModel):
                     f.write(result.to_json())
                 wandb.save(file, base_path=self.results_dir, policy="now")
             else:
-                file = dir / f"{key}.json"
-                with open(file, "w") as f:
-                    json.dump(result, f, indent=4, ensure_ascii=False)
-                wandb.save(file, base_path=self.results_dir, policy="now")
+                try:
+                    file = dir / f"{key}.json"
+                    with open(file, "w") as f:
+                        json.dump(result, f, indent=4, ensure_ascii=False)
+                    wandb.save(file, base_path=self.results_dir, policy="now")
+                except Exception as e:
+                    logging.error(f"Error in saving files: {e}")
 
         _rec_save_files(result, output_dir, "result")
 
