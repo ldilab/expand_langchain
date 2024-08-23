@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import pprint
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +42,20 @@ class Loader(BaseModel):
         for k, v in api_keys.items():
             os.environ[k] = v
 
-    def run(self):
+    def run(
+        self,
+        print_sample_size=0,
+    ):
         sources = self.load_sources()
         self.result = self._load_datasets(sources)
+
+        for key, value in self.result.items():
+            _keys = list(value.keys())
+            for i in range(print_sample_size):
+                _key = _keys[i]
+                print(f"### {key} - {_key} ###")
+                pprint.pprint(value[_key])
+                print()
 
         return self
 
@@ -57,7 +69,9 @@ class Loader(BaseModel):
                 path = source.kwargs.get("path")
                 sort_key = source.kwargs.get("sort_key")
                 split = source.kwargs.get("split")
-                sources[name] = load_dataset(path)[split].sort(sort_key)
+                load_dataset_kwargs = source.kwargs.get("load_dataset_kwargs", {})
+                dataset = load_dataset(path, **load_dataset_kwargs)[split]
+                sources[name] = dataset.sort(sort_key)
 
             elif source.type == "json":
                 path = source.kwargs.get("path")
@@ -115,7 +129,7 @@ class Loader(BaseModel):
         pass
 
 
-def _load_dict(sources, primary_key, fields):
+def _load_dict(sources, primary_key, fields, query=None):
     result = {}
 
     primary_field = list(filter(lambda x: x.get("name") == primary_key, fields))[0]
@@ -126,7 +140,16 @@ def _load_dict(sources, primary_key, fields):
             source = sources[field.get("source")]
             result[id][field.get("name")] = source[i][field.get("key")]
 
-    return result
+    if query is not None:
+        from tinydb import TinyDB, where
+        from tinydb.storages import MemoryStorage
+
+        db = TinyDB(storage=MemoryStorage)
+        db.insert_multiple(list(result.values()))
+        result = db.search(eval(query, {"where": where}))
+        return {r[primary_key]: r for r in result}
+    else:
+        return result
 
 
 def _load_db_schema(sources_dict, sources, index_name, rerun=False):
