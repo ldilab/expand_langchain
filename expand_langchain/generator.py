@@ -115,11 +115,15 @@ class Generator(BaseModel):
         self,
         n: Optional[int] = None,
         ids: Optional[list] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
     ):
         targets = self.target_dataset
 
         if n is not None:
             targets = {k: v for k, v in list(targets.items())[:n]}
+        elif start is not None and end is not None:
+            targets = {k: v for k, v in list(targets.items())[start:end]}
         elif ids is not None:
             targets = {k: v for k, v in targets.items() if k in ids}
         else:
