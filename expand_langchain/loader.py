@@ -125,6 +125,15 @@ class Loader(BaseModel):
 
         return datasets
 
+    def save(self, path):
+        if not Path(path).parent.exists():
+            Path(path).parent.mkdir(parents=True)
+
+        with open(path, "w") as f:
+            json.dump(self.result, f, indent=2, ensure_ascii=False)
+
+        return self
+
     def exit(self):
         pass
 
