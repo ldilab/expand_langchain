@@ -1,4 +1,5 @@
 import os
+from itertools import zip_longest
 from typing import List, Optional
 
 from expand_langchain.utils.registry import chain_registry
@@ -17,13 +18,17 @@ def execute_chain(
     def _func(data, config={}):
         result = {}
         result[key] = []
-        for target, testcase in zip(data[code_key], data[testcase_key]):
+        for target, testcase in zip_longest(
+            data[code_key],
+            data.get(testcase_key, []),
+            fillvalue={},
+        ):
             if isinstance(target, str):
                 response = JsonRequestsWrapper().post(
                     os.environ["CODEEXEC_ENDPOINT"],
                     data={
                         "code": target,
-                        "stdin": testcase[stdin_key],
+                        "stdin": testcase.get(stdin_key, ""),
                         **kwargs,
                     },
                 )
@@ -32,12 +37,16 @@ def execute_chain(
 
             elif isinstance(target, list):
                 outputs = []
-                for _target, _testcase in zip(target, testcase):
+                for _target, _testcase in zip_longest(
+                    target,
+                    testcase,
+                    fillvalue={},
+                ):
                     response = JsonRequestsWrapper().post(
                         os.environ["CODEEXEC_ENDPOINT"],
                         data={
                             "code": _target,
-                            "stdin": _testcase[stdin_key],
+                            "stdin": _testcase.get(stdin_key, ""),
                             **kwargs,
                         },
                     )
