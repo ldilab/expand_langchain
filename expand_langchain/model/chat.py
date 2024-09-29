@@ -6,7 +6,7 @@ from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
 from langchain.chat_models.base import BaseChatModel
 from langchain.schema import BaseMessage, ChatResult
-from langchain_community.chat_models import ChatOllama
+from langchain_community.chat_models import ChatLiteLLM, ChatOllama
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 
@@ -16,9 +16,11 @@ class GeneralChatModel(BaseChatModel):
     max_tokens: int
     temperature: float
     top_p: float
+    num_ctx: Optional[int] = None
     max_retries: int = 10000
     platform: str = "azure"
     stop: Optional[List[str]] = None
+    base_url: Optional[str] = None
 
     llm: BaseChatModel = None
 
@@ -53,12 +55,26 @@ class GeneralChatModel(BaseChatModel):
         elif self.platform == "open_webui":
             return ChatOllama(
                 model=self.model,
-                num_ctx=self.max_tokens,
+                num_predict=self.max_tokens,
+                num_ctx=self.num_ctx,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 base_url=os.environ["OPEN_WEBUI_BASE_URL"],
                 headers={
                     "Authorization": f"Bearer {os.environ['OPEN_WEBUI_API_KEY']}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        elif self.platform == "ollama":
+            return ChatOllama(
+                model=self.model,
+                num_predict=self.max_tokens,
+                num_ctx=self.num_ctx,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                base_url=self.base_url or os.environ["OLLAMA_BASE_URL"],
+                headers={
                     "Content-Type": "application/json",
                 },
             )
@@ -74,12 +90,13 @@ class GeneralChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         try:
-            return self.llm._generate(
+            result = self.llm._generate(
                 messages=messages,
                 stop=stop + self.stop if stop is not None else self.stop,
                 run_manager=run_manager,
                 **kwargs,
             )
+            return result
         except ValueError as e:
             if "content filter" in str(e):
                 logging.error(f"content filter triggered")
