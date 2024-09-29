@@ -11,6 +11,7 @@ def custom_lambda_chain(
     key: str,
     src: List[str],
     func: str,
+    distribute: bool = True,
     **kwargs,
 ):
     def _func(data, config={}):
@@ -24,7 +25,11 @@ def custom_lambda_chain(
         result = {}
         result[key] = []
 
-        new_src = [data[x] if isinstance(data[x], list) else [data[x]] for x in src]
+        if distribute:
+            new_src = [data[x] if isinstance(data[x], list) else [data[x]] for x in src]
+        else:   
+            new_src = [[data[x]] for x in src]
+
         for args in itertools.product(*new_src):
             result[key].append(func_obj(*args))
 
