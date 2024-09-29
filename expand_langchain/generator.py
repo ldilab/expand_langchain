@@ -155,7 +155,7 @@ class Generator(BaseModel):
         Run the target and save the result as json file
         """
         done = False
-        path = self.results_dir / f"{id.replace('/', '_')}.json"
+        path = self.results_dir / f"{str(id).replace('/', '_')}.json"
         if path.exists() and not self.rerun:
             logging.info(f"{id} already exists. Skipping...")
             try:
