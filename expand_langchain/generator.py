@@ -192,6 +192,10 @@ class Generator(BaseModel):
         """
         Save result as json file
         """
+        path = self.results_dir / f"{id}.json"
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(self.results_dir / f"{id}.json", "w") as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
 
@@ -199,6 +203,10 @@ class Generator(BaseModel):
         """
         Save result as yaml file
         """
+        path = self.results_dir / f"{id}.yaml"
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(self.results_dir / f"{id}.yaml", "w") as f:
             yaml.dump(
                 result, f, default_style="|", default_flow_style=False, sort_keys=False
