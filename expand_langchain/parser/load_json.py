@@ -1,9 +1,8 @@
-import json
 from typing import Dict, List
 
-from langchain_core.runnables import RunnableLambda
-
+import json5 as json
 from expand_langchain.utils.registry import parser_registry
+from langchain_core.runnables import RunnableLambda
 
 
 @parser_registry(name="load_json")
