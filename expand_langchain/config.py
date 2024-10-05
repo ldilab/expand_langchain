@@ -15,7 +15,7 @@ class DatasetConfig(BaseModel):
     name: str
     type: str
     remove: bool = False
-    kwargs: dict
+    kwargs: Optional[dict] = None
 
 
 class EdgeConfig(BaseModel):
