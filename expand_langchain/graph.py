@@ -1,5 +1,8 @@
 import asyncio
-from typing import Dict, List
+import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
@@ -58,6 +61,7 @@ def node_factory(
         input_keys = config.input_keys
         key_map = config.key_map
         type = config.type
+        cache_path = config.cache_path
         kwargs = config.kwargs or {}
 
         chain = node_chain(
@@ -65,6 +69,7 @@ def node_factory(
             input_keys=input_keys,
             key_map=key_map,
             type=type,
+            cache_path=cache_path,
             examples=examples,
             etc_datasets=etc_datasets,
             **kwargs,
@@ -86,6 +91,7 @@ def node_chain(
     input_keys: List[str],
     key_map: Dict[str, str],
     type: str,
+    cache_path: Optional[Path] = None,
     examples: dict = {},
     etc_datasets: dict = {},
     **kwargs,
@@ -98,11 +104,29 @@ def node_chain(
     )
 
     async def _func(data, config={}):
+        verbose = config.get("verbose", False)
+        id = config.get("id", None)
+        if id and cache_path:
+            path = cache_path / f"{id}.json"
+            if path.exists():
+                if verbose:
+                    logging.info(f"Loading from cache: {path}")
+                with open(path, "r") as f:
+                    return json.load(f)
+
         cur_data = {}
         for key in input_keys:
             cur_data[key_map[key]] = data.get(key, None) or etc_datasets[key]
 
-        return await chain.ainvoke(cur_data, config=config)
+        result = await chain.ainvoke(cur_data, config=config)
+
+        if id and cache_path:
+            with open(path, "w") as f:
+                json.dump(result, f, indent=2, ensure_ascii=False)
+            if verbose:
+                logging.info(f"Saved to cache: {path}")
+
+        return result
 
     return RunnableLambda(_func, name=key)
 

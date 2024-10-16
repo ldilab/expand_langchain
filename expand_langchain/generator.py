@@ -50,6 +50,9 @@ class Generator(BaseModel):
     def __init__(self, **data):
         super().__init__(**data)
 
+        if self.verbose:
+            logging.basicConfig(level=logging.INFO)
+
         self._load_config()
         self._init_result_dir()
         self._load_api_keys()
@@ -155,7 +158,8 @@ class Generator(BaseModel):
         Run the target and save the result as json file
         """
         done = False
-        path = self.results_dir / f"{str(id).replace('/', '_')}.json"
+        id = str(id)
+        path = self.results_dir / f"{id.replace('/', '_')}.json"
         if path.exists() and not self.rerun:
             logging.info(f"{id} already exists. Skipping...")
             try:
@@ -177,6 +181,7 @@ class Generator(BaseModel):
                 else:
                     config = {}
 
+                config.update({"id": id, "verbose": self.verbose})
                 try:
                     result = await self.graph.ainvoke([target], config=config)
                     logging.info(f"Done: {id}")

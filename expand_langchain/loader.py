@@ -79,6 +79,16 @@ class Loader(BaseModel):
                 data_json = json.loads(Path(path).read_text())
                 sources[name] = Dataset.from_list(data_json).sort(sort_key)
 
+            elif source.type == "jsonl":
+                path = source.kwargs.get("path")
+                sort_key = source.kwargs.get("sort_key")
+                data_jsonl = [
+                    json.loads(line)
+                    for line in Path(path).read_text().split("\n")
+                    if line
+                ]
+                sources[name] = Dataset.from_list(data_jsonl).sort(sort_key)
+
             elif source.type == "yaml":
                 path = source.kwargs.get("path")
                 sort_key = source.kwargs.get("sort_key")
@@ -138,7 +148,31 @@ class Loader(BaseModel):
         pass
 
 
-def _load_dict(sources, primary_key, fields, query=None):
+def _load_dict(
+    sources,
+    primary_key,
+    fields,
+    query: str = None,
+    cache_dir: str = None,
+    custom_lambda: str = None,
+):
+    config = {
+        "primary_key": primary_key,
+        "fields": fields,
+        "query": query,
+    }
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        config_path = cache_dir / "config.json"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                cache_config = json.load(f)
+            if cache_config == config:
+                data_path = cache_dir / "data.json"
+                if data_path.exists():
+                    with open(data_path, "r") as f:
+                        return json.load(f)
+
     result = {}
 
     primary_field = list(filter(lambda x: x.get("name") == primary_key, fields))[0]
@@ -149,6 +183,16 @@ def _load_dict(sources, primary_key, fields, query=None):
             source = sources[field.get("source")]
             result[id][field.get("name")] = source[i][field.get("key")]
 
+    if custom_lambda is not None:
+        try:
+            func_obj = eval(custom_lambda)
+        except:
+            local_namespace = {}
+            exec(custom_lambda, globals(), local_namespace)
+            func_obj = local_namespace["func"]
+
+        result = {k: func_obj(v) for k, v in result.items()}
+
     if query is not None:
         from tinydb import TinyDB, where
         from tinydb.storages import MemoryStorage
@@ -156,9 +200,19 @@ def _load_dict(sources, primary_key, fields, query=None):
         db = TinyDB(storage=MemoryStorage)
         db.insert_multiple(list(result.values()))
         result = db.search(eval(query, {"where": where}))
-        return {r[primary_key]: r for r in result}
-    else:
-        return result
+        result = {r[primary_key]: r for r in result}
+
+    if cache_dir is not None:
+        if not cache_dir.exists():
+            cache_dir.mkdir(parents=True)
+
+        with open(cache_dir / "config.json", "w") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
+        with open(cache_dir / "data.json", "w") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+
+    return result
 
 
 def _load_db_schema(sources_dict, sources, index_name, rerun=False):

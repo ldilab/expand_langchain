@@ -6,7 +6,7 @@ from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
 from langchain.chat_models.base import BaseChatModel
 from langchain.schema import BaseMessage, ChatResult
-from langchain_community.chat_models import ChatLiteLLM, ChatOllama
+from langchain_community.chat_models import ChatOllama
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 

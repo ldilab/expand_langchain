@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
 import yaml
@@ -29,6 +30,7 @@ class ChainConfig(BaseModel):
     dependencies: List[str]
     input_keys: List[str]
     key_map: Dict[str, str] = None
+    cache_path: Optional[Path] = None
     type: str
     kwargs: dict = {}
 

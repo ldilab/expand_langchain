@@ -1,8 +1,8 @@
 import re
 from typing import Dict, List, Tuple, Union
 
-from langchain_core.runnables import RunnableLambda
 from expand_langchain.utils.registry import parser_registry
+from langchain_core.runnables import RunnableLambda
 
 
 @parser_registry(name="code_block")
@@ -11,13 +11,21 @@ def code_block_runner():
         pattern = r"```[a-z]*\n(.*?)```"
         match = re.search(pattern, input, re.DOTALL)
         if match:
-            return match.group(1)
+            matches = re.findall(pattern, input, re.DOTALL)
+            if matches:
+                return matches[-1]
+            else:
+                return match.group(1)
         else:
             # if last ``` is missing
             pattern = r"```[a-z]*\n(.*?)$"
             match = re.search(pattern, input, re.DOTALL)
             if match:
-                return match.group(1)
+                matches = re.findall(pattern, input, re.DOTALL)
+                if matches:
+                    return matches[-1]
+                else:
+                    return match.group(1)
             else:
                 return input
 
