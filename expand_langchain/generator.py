@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 from traceback import format_exc
-from typing import Optional
+from typing import Any, List, Optional
 
 import yaml
 from expand_langchain.config import Config
@@ -27,6 +27,7 @@ from expand_langchain.transition import *
 
 class Generator(BaseModel):
     verbose: bool = False
+    do_save: bool = True
     api_keys_path: str = "api_keys.json"
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
@@ -71,9 +72,10 @@ class Generator(BaseModel):
     def _init_result_dir(self):
         if self.run_name is None:
             self.run_name = self.config_path.stem
-        self.output_dir = Path(f"results/{self.run_name}")
-        self.results_dir = self.output_dir / "results"
-        self.results_dir.mkdir(parents=True, exist_ok=True)
+        if self.do_save:
+            self.output_dir = Path(f"results/{self.run_name}")
+            self.results_dir = self.output_dir / "results"
+            self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_api_keys(self):
         api_keys = json.loads(Path(self.api_keys_path).read_text())
@@ -92,7 +94,7 @@ class Generator(BaseModel):
     def _init_wandb(self):
         wandb.require("core")
 
-        mode = "offline"
+        mode = "disabled"
         if self.wandb_on:
             logging.info("Wandb mode is online")
             mode = "online"
@@ -101,7 +103,7 @@ class Generator(BaseModel):
             mode=mode,
             entity=os.environ.get("WANDB_ENTITY", None),
             project=os.environ.get("WANDB_PROJECT", None),
-            name=self.config_path.stem,
+            name=self.run_name,
             notes=self.config.description,
         )
 
@@ -159,17 +161,18 @@ class Generator(BaseModel):
         """
         done = False
         id = str(id)
-        path = self.results_dir / f"{id.replace('/', '_')}.json"
-        if path.exists() and not self.rerun:
-            logging.info(f"{id} already exists. Skipping...")
-            try:
-                result = json.loads(path.read_text())
-                if "error" in result[0]:
-                    raise Exception("Error in previous run")
-                done = True
-            except Exception as e:
-                logging.error(f"Error in loading {id}")
-                logging.error(format_exc())
+        if self.do_save:
+            path = self.results_dir / f"{str(id).replace('/', '_')}.json"
+            if path.exists() and not self.rerun:
+                logging.info(f"{id} already exists. Skipping...")
+                try:
+                    result = json.loads(path.read_text())
+                    if "error" in result[0]:
+                        raise Exception("Error in previous run")
+                    done = True
+                except Exception as e:
+                    logging.error(f"Error in loading {id}")
+                    logging.error(format_exc())
 
         if not done:
             async with sem:
@@ -189,9 +192,12 @@ class Generator(BaseModel):
                     logging.error(f"Error in running {id}")
                     result = [{"error": format_exc()}]
 
-        self._save_json(id.replace("/", "_"), result)
-        self._save_yaml(id.replace("/", "_"), result)
-        self._save_files(id.replace("/", "_"), result)
+        if self.do_save:
+            self._save_json(id.replace("/", "_"), result)
+            self._save_yaml(id.replace("/", "_"), result)
+            self._save_files(id.replace("/", "_"), result)
+
+        return result
 
     def _save_json(self, id: str, result: dict):
         """
@@ -293,3 +299,18 @@ class Generator(BaseModel):
         Exit the generator
         """
         pass
+
+    def run_user_input(self, nl_query: str):
+        """
+        Run user input
+        """
+        target = {"prompt": nl_query}
+        result = asyncio.run(
+            self._run_one(
+                "user_input",
+                target,
+                asyncio.Semaphore(1),
+            )
+        )
+
+        return result

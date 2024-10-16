@@ -42,20 +42,9 @@ class Loader(BaseModel):
         for k, v in api_keys.items():
             os.environ[k] = v
 
-    def run(
-        self,
-        print_sample_size=0,
-    ):
+    def run(self):
         sources = self.load_sources()
         self.result = self._load_datasets(sources)
-
-        for key, value in self.result.items():
-            _keys = list(value.keys())
-            for i in range(print_sample_size):
-                _key = _keys[i]
-                print(f"### {key} - {_key} ###")
-                pprint.pprint(value[_key])
-                print()
 
         return self
 
@@ -103,6 +92,9 @@ class Loader(BaseModel):
                     host=os.getenv("POSTGRES_HOST"),
                     port=os.getenv("POSTGRES_PORT"),
                 )
+
+            elif source.type == "user_input":
+                sources[name] = None
             else:
                 raise ValueError(f"Unsupported source type: {source.type}")
 
@@ -126,6 +118,9 @@ class Loader(BaseModel):
                 if dataset.remove and not dataset.kwargs.get("rerun"):
                     continue
                 result = _load_db_value(sources, **dataset.kwargs)
+
+            elif dataset.type == "user_input":
+                result = None
 
             else:
                 raise ValueError(f"Unknown dataset type: {dataset.type}")
