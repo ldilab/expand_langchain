@@ -5,13 +5,13 @@ import pprint
 from pathlib import Path
 from typing import Any
 
-import psycopg2
 import yaml
 from datasets import Dataset, load_dataset
 from elasticsearch import Elasticsearch, helpers
-from expand_langchain.config import Config, DatasetConfig, SourceConfig
 from pydantic import BaseModel
 from tqdm import tqdm
+
+from expand_langchain.config import Config, DatasetConfig, SourceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +85,8 @@ class Loader(BaseModel):
                 sources[name] = Dataset.from_list(data_yaml).sort(sort_key)
 
             elif source.type == "postgresql":
+                import psycopg2
+
                 sources[name] = psycopg2.connect(
                     dbname=source.kwargs.get("dbname"),
                     user=os.getenv("POSTGRES_USER"),
