@@ -300,17 +300,21 @@ class Generator(BaseModel):
         """
         pass
 
-    def run_user_input(self, nl_query: str):
+    async def astream_user_input(
+        self,
+        nl_query: str,
+        event_names: Optional[List[str]] = None,
+    ):
         """
         Run user input
         """
         target = {"prompt": nl_query}
-        result = asyncio.run(
-            self._run_one(
-                "user_input",
-                target,
-                asyncio.Semaphore(1),
-            )
-        )
 
-        return result
+        gen = self.graph.astream_events(
+            [target],
+            version="v2",
+            include_names=event_names,
+        )
+        async for result in gen:
+            if result["event"] == "on_chain_end":
+                yield result["data"]["output"]

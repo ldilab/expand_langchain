@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
 from expand_langchain.utils.registry import chain_registry, transition_registry
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
@@ -26,7 +26,7 @@ class Graph(BaseModel):
         nodes = self.config.nodes
         for node in nodes:
             node: NodeConfig
-            chain = node_factory(
+            chain = langgraph_node_factory(
                 configs=node.chains,
                 examples=self.examples,
                 etc_datasets=self.etc_datasets,
@@ -49,7 +49,7 @@ class Graph(BaseModel):
         return builder.compile()
 
 
-def node_factory(
+def langgraph_node_factory(
     configs: List[ChainConfig],
     examples: dict = {},
     etc_datasets: dict = {},
@@ -83,7 +83,7 @@ def node_factory(
             if dependency in nx_graph.nodes:
                 nx_graph.add_edge(dependency, name)
 
-    return graph_chain(nx_graph)
+    return GraphChain(nx_graph)
 
 
 def node_chain(
@@ -131,54 +131,103 @@ def node_chain(
     return RunnableLambda(_func, name=key)
 
 
-def graph_chain(graph: nx.DiGraph):
-    async def run_node(chain, inputs, results, tasks, lock, config):
-        if chain.name in results:
-            return results[chain.name]
+class GraphChain(Runnable):
+    def __init__(self, graph: nx.DiGraph):
+        self.graph = graph
 
-        parents = list(graph.predecessors(chain.name))
-        new_tasks = []
-        for parent in parents:
-            _chain = graph.nodes[parent]["chain"]
-            async with lock:
-                if parent not in tasks:
-                    task = asyncio.create_task(
-                        run_node(_chain, inputs, results, tasks, lock, config)
-                    )
-                    tasks[parent] = task
-                else:
-                    task = tasks[parent]
-                new_tasks.append(task)
+    def invoke(
+        self,
+        input: List[dict],
+        config=None,
+        **kwargs,
+    ):
+        return asyncio.run(self.ainvoke(input, config))
 
-        if new_tasks:
-            await asyncio.gather(*new_tasks)
+    async def ainvoke(
+        self,
+        input: List[dict],
+        config=None,
+        **kwargs,
+    ):
+        result = [res async for res in self.astream(input, config)]
 
-        new_result = await chain.ainvoke({**inputs, **results}, config=config)
-        async with lock:
-            results.update(new_result)
+        return result[-1]
 
-        return new_result
-
-    async def _func(data: List[dict], config={}):
-        inputs = {}
-        for input in data:
-            inputs.update(input)
+    async def astream(
+        self,
+        input: List[dict],
+        config=None,
+        **kwargs,
+    ):
+        node_input = {}
+        for _input in input:
+            node_input.update(_input)
 
         lock = asyncio.Lock()
         results = {}
-        tasks = {}
-        for node in nx.topological_sort(graph):
-            chain = graph.nodes[node]["chain"]
+        input.append(results)
+        for node in nx.topological_sort(self.graph):
+            chain = self.graph.nodes[node]["chain"]
+            node = NodeChain(chain)
+            gen = node.astream(node_input, self.graph, results, lock, config)
+            async for result in gen:
+                input[-1] = result
+                yield input
+
+
+class NodeChain(Runnable):
+    def __init__(self, chain: Runnable):
+        self.chain = chain
+
+    def invoke(
+        self,
+        input: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
+        config=None,
+        **kwargs,
+    ):
+        return asyncio.run(self.ainvoke(input, graph, results, lock, config))
+
+    async def ainvoke(
+        self,
+        input: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
+        config=None,
+        **kwargs,
+    ):
+        result = [
+            res async for res in self.astream(input, graph, results, lock, config)
+        ]
+
+        return result[-1]
+
+    async def astream(
+        self,
+        input: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
+        config=None,
+        **kwargs,
+    ):
+        if self.chain.name in results:
+            yield results
+
+        else:
+            parents = list(graph.predecessors(self.chain.name))
+            for parent in parents:
+                _chain = graph.nodes[parent]["chain"]
+                node = NodeChain(_chain)
+                gen = node.astream(input, graph, results, lock, config)
+                async for _ in gen:
+                    yield results
+
+            new_result = await self.chain.ainvoke({**input, **results}, config=config)
             async with lock:
-                if chain.name not in tasks:
-                    task = asyncio.create_task(
-                        run_node(chain, inputs, results, tasks, lock, config)
-                    )
-                    tasks[chain.name] = task
+                results.update(new_result)
 
-        await asyncio.gather(*list(tasks.values()))
-
-        data.append(results)
-        return data
-
-    return RunnableLambda(_func, name="graph_chain")
+            yield results
