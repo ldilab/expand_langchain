@@ -318,3 +318,23 @@ class Generator(BaseModel):
         async for result in gen:
             if result["event"] == "on_chain_end":
                 yield result["data"]["output"]
+
+    def lark_message(
+        self,
+        msg: str = "Done",
+    ):
+        """
+        Send message to the webhook
+        """
+        webhook = os.environ.get("LARK_WEBHOOK", None)
+        if webhook is None:
+            return self
+
+        import requests
+
+        requests.post(
+            webhook,
+            json={"msg_type": "text", "content": {"text": msg}},
+        )
+
+        return self
