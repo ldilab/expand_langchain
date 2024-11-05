@@ -187,7 +187,11 @@ class Generator(BaseModel):
                 config.update({"id": id, "verbose": self.verbose})
                 try:
                     result = await self.graph.ainvoke([target], config=config)
-                    logging.info(f"Done: {id}")
+
+                    if "error" in result:
+                        logging.error(f"Error in running {id}")
+                    else:
+                        logging.info(f"Done: {id}")
                 except Exception as e:
                     logging.error(f"Error in running {id}")
                     result = [{"error": format_exc()}]

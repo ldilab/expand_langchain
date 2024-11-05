@@ -1,3 +1,4 @@
+import traceback
 from typing import Any, List, Optional
 
 from expand_langchain.chain.llm import llm_chain
@@ -21,13 +22,26 @@ def cot_chain(
             **kwargs,
         )
         parser = parser_chain(**kwargs)
-        result = await chain.ainvoke(data, config=config)
-        parsed_result = parser.invoke(result, config=config)
+        try:
+            result = await chain.ainvoke(data, config=config)
+        except Exception as e:
+            return {
+                f"error": traceback.format_exc(),
+            }
 
-        return {
-            f"{key}_raw": result,
-            key: parsed_result,
-        }
+        try:
+            parsed_result = parser.invoke(result, config=config)
+
+            return {
+                f"{key}_raw": result,
+                key: parsed_result,
+            }
+
+        except Exception as e:
+            return {
+                f"{key}_raw": result,
+                f"error": traceback.format_exc(),
+            }
 
     chain = RunnableLambda(_func)
 
