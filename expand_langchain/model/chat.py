@@ -6,7 +6,7 @@ from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
 from langchain.chat_models.base import BaseChatModel
 from langchain.schema import BaseMessage, ChatResult
-from langchain_community.chat_models import ChatOllama
+from langchain_community.chat_models import ChatOllama, VLLMOpenAI
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 
@@ -77,6 +77,16 @@ class GeneralChatModel(BaseChatModel):
                 headers={
                     "Content-Type": "application/json",
                 },
+            )
+
+        elif self.platform == "vllm":
+            return VLLMOpenAI(
+                openai_api_key=os.environ["VLLM_BASE_URL"],
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                max_retries=self.max_retries,
             )
 
         else:
