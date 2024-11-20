@@ -27,6 +27,7 @@ from expand_langchain.transition import *
 
 class Generator(BaseModel):
     verbose: bool = False
+    debug: bool = False
     do_save: bool = True
     api_keys_path: str = "api_keys.json"
     target_dataset_name: str = "target"
@@ -185,16 +186,18 @@ class Generator(BaseModel):
                     config = {}
 
                 config.update({"id": id, "verbose": self.verbose})
+
                 try:
                     result = await self.graph.ainvoke([target], config=config)
+                    logging.info(f"Done: {id}")
 
-                    if "error" in result:
-                        logging.error(f"Error in running {id}")
-                    else:
-                        logging.info(f"Done: {id}")
                 except Exception as e:
                     logging.error(f"Error in running {id}")
+                    logging.error(format_exc())
                     result = [{"error": format_exc()}]
+
+                    if self.debug:
+                        raise e
 
         if self.do_save:
             self._save_json(id.replace("/", "_"), result)

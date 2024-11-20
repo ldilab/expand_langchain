@@ -4,9 +4,10 @@ from typing import Any, List, Optional
 
 from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
-from langchain.chat_models.base import BaseChatModel
 from langchain.schema import BaseMessage, ChatResult
-from langchain_community.chat_models import ChatOllama, VLLMOpenAI
+from langchain_community.chat_models import ChatOllama
+from langchain_community.llms import VLLMOpenAI
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
 
@@ -17,12 +18,10 @@ class GeneralChatModel(BaseChatModel):
     temperature: float
     top_p: float
     num_ctx: Optional[int] = None
-    max_retries: int = 10000
+    max_retries: int = 10
     platform: str = "azure"
     stop: Optional[List[str]] = None
     base_url: Optional[str] = None
-
-    llm: BaseChatModel = None
 
     @property
     def _llm_type(self) -> str:
@@ -80,12 +79,13 @@ class GeneralChatModel(BaseChatModel):
             )
 
         elif self.platform == "vllm":
-            return VLLMOpenAI(
-                openai_api_key=os.environ["VLLM_BASE_URL"],
-                model=self.model,
+            return ChatOpenAI(
+                openai_api_key=os.environ.get("VLLM_API_KEY"),
+                openai_api_base=os.environ["VLLM_BASE_URL"],
+                model="gpt-3.5-turbo",
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                top_p=self.top_p,
+                model_kwargs={"top_p": self.top_p},
                 max_retries=self.max_retries,
             )
 

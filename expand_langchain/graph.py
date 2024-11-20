@@ -121,6 +121,8 @@ def node_chain(
         result = await chain.ainvoke(cur_data, config=config)
 
         if id and cache_path:
+            if not path.parent.exists():
+                path.parent.mkdir(parents=True)
             with open(path, "w") as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
             if verbose:
@@ -170,13 +172,9 @@ class GraphChain(Runnable):
             chain = self.graph.nodes[node]["chain"]
             node = NodeChain(chain)
             gen = node.astream(node_input, self.graph, results, lock, config)
-            try:
-                async for result in gen:
-                    input[-1] = result
-                    yield input
-            except Exception as e:
+            async for result in gen:
+                input[-1] = result
                 yield input
-                return
 
 
 class NodeChain(Runnable):
@@ -227,12 +225,8 @@ class NodeChain(Runnable):
                 _chain = graph.nodes[parent]["chain"]
                 node = NodeChain(_chain)
                 gen = node.astream(input, graph, results, lock, config)
-                try:
-                    async for _ in gen:
-                        yield results
-                except Exception as e:
+                async for _ in gen:
                     yield results
-                    return
 
             new_result = await self.chain.ainvoke({**input, **results}, config=config)
             async with lock:
