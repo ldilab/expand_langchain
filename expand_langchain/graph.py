@@ -1,164 +1,163 @@
 import asyncio
-import json
-import logging
-from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Type
 
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
 from expand_langchain.utils.registry import chain_registry, transition_registry
-from langchain_core.runnables import Runnable, RunnableLambda
+from langchain_core.runnables import Runnable
 from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
 
-class Graph(BaseModel):
-    config: GraphConfig
-    examples: dict = {}
-    etc_datasets: dict = {}
+class NodeChain(BaseModel, Runnable):
+    key: str
+    type: str
+    key_map: Dict[str, str]
+    output_keys: List[str]
+    examples: dict
+    etc_datasets: dict
+    kwargs: dict = {}
+
+    chain: Runnable = None
+
+    # pydantic config
+    class Config:
+        arbitrary_types_allowed = True
 
     def __init__(self, **data):
         super().__init__(**data)
 
-    def run(self):
-        builder = StateGraph(List[dict])
-
-        nodes = self.config.nodes
-        for node in nodes:
-            node: NodeConfig
-            chain = langgraph_node_factory(
-                configs=node.chains,
-                examples=self.examples,
-                etc_datasets=self.etc_datasets,
-            )
-
-            builder.add_node(node.name, chain)
-
-        entry_point = self.config.entry_point
-        builder.set_entry_point(entry_point)
-
-        edges = self.config.edges
-        for edge in edges:
-            pair = edge.pair
-            if edge.type == "always":
-                builder.add_edge(pair[0], pair[1])
-            else:
-                func = transition_registry.get(edge.type)(dest=pair[1], **edge.kwargs)
-                builder.add_conditional_edges(pair[0], func)
-
-        return builder.compile()
-
-
-def langgraph_node_factory(
-    configs: List[ChainConfig],
-    examples: dict = {},
-    etc_datasets: dict = {},
-):
-    nx_graph = nx.DiGraph()
-    for config in configs:
-        name = config.name
-        dependencies = config.dependencies
-        input_keys = config.input_keys
-        key_map = config.key_map
-        type = config.type
-        cache_path = config.cache_path
-        kwargs = config.kwargs or {}
-
-        chain = node_chain(
-            key=name,
-            input_keys=input_keys,
-            key_map=key_map,
-            type=type,
-            cache_path=cache_path,
-            examples=examples,
-            etc_datasets=etc_datasets,
-            **kwargs,
+        self.name = "NodeChain"
+        self.chain = chain_registry[self.type](
+            key=self.key,
+            examples=self.examples,
+            **self.kwargs,
         )
-        nx_graph.add_node(name, chain=chain)
 
-    for config in configs:
-        name = config.name
-        dependencies = config.dependencies
-        for dependency in dependencies:
-            if dependency in nx_graph.nodes:
-                nx_graph.add_edge(dependency, name)
-
-    return GraphChain(nx_graph)
-
-
-def node_chain(
-    key: str,
-    input_keys: List[str],
-    key_map: Dict[str, str],
-    type: str,
-    cache_path: Optional[Path] = None,
-    examples: dict = {},
-    etc_datasets: dict = {},
-    **kwargs,
-):
-    chain = chain_registry[type](
-        key=key,
-        input_keys=input_keys,
-        examples=examples,
+    async def astream(
+        self,
+        input: dict,
+        config: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
         **kwargs,
-    )
+    ):
+        if self.key in results:
+            yield results
 
-    async def _func(data, config={}):
-        verbose = config.get("verbose", False)
-        id = config.get("id", None)
-        if id and cache_path:
-            path = cache_path / f"{id}.json"
-            if path.exists():
-                if verbose:
-                    logging.info(f"Loading from cache: {path}")
-                with open(path, "r") as f:
-                    return json.load(f)
+        else:
+            parents = list(graph.predecessors(self.key))
+            for parent in parents:
+                node = graph.nodes[parent]["chain"]
+                gen = node.astream(
+                    input=input,
+                    config=config,
+                    graph=graph,
+                    results=results,
+                    lock=lock,
+                )
+                async for _ in gen:
+                    yield results
 
-        cur_data = {}
-        for key in input_keys:
-            cur_data[key_map[key]] = data.get(key, None) or etc_datasets[key]
+            data = {**input, **results}
 
-        result = await chain.ainvoke(cur_data, config=config)
+            mapped_data = {}
+            for k in data.keys():
+                mapped_key = self.key_map.get(k, k)
+                mapped_data[mapped_key] = data.get(k, None) or self.etc_datasets[k]
 
-        if id and cache_path:
-            if not path.parent.exists():
-                path.parent.mkdir(parents=True)
-            with open(path, "w") as f:
-                json.dump(result, f, indent=2, ensure_ascii=False)
-            if verbose:
-                logging.info(f"Saved to cache: {path}")
+            new_result = await self.chain.ainvoke(mapped_data, config=config)
 
-        return result
+            async with lock:
+                results.update(new_result)
 
-    return RunnableLambda(_func, name=key)
-
-
-class GraphChain(Runnable):
-    def __init__(self, graph: nx.DiGraph):
-        self.graph = graph
+            yield results
 
     def invoke(
         self,
-        input: List[dict],
-        config=None,
+        input: dict,
+        config: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
         **kwargs,
     ):
-        return asyncio.run(self.ainvoke(input, config))
+        return asyncio.run(self.ainvoke(input, graph, results, lock, config))
 
     async def ainvoke(
         self,
-        input: List[dict],
-        config=None,
+        input: dict,
+        config: dict,
+        graph: nx.DiGraph,
+        results: dict,
+        lock: asyncio.Lock,
         **kwargs,
     ):
-        result = [res async for res in self.astream(input, config)]
+        result = [
+            res
+            async for res in self.astream(
+                input=input,
+                config=config,
+                graph=graph,
+                results=results,
+                lock=lock,
+            )
+        ]
 
         return result[-1]
+
+
+class GraphChain(BaseModel, Runnable):
+    graph: nx.DiGraph = None
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def __init__(
+        self,
+        configs: List[ChainConfig],
+        examples: dict = {},
+        etc_datasets: dict = {},
+        **data,
+    ):
+        super().__init__(**data)
+
+        self.name = "GraphChain"
+
+        nx_graph = nx.DiGraph()
+        for config in configs:
+            name = config.name
+            dependencies = config.dependencies
+            output_keys = config.output_keys
+            key_map = config.key_map
+            type = config.type
+            kwargs = config.kwargs or {}
+
+            chain = NodeChain(
+                key=name,
+                output_keys=output_keys,
+                key_map=key_map,
+                type=type,
+                examples=examples,
+                etc_datasets=etc_datasets,
+                kwargs=kwargs,
+            )
+            nx_graph.add_node(name, chain=chain)
+
+        for config in configs:
+            name = config.name
+            dependencies = config.dependencies
+            for dependency in dependencies:
+                if dependency in nx_graph.nodes:
+                    nx_graph.add_edge(dependency, name)
+
+        self.graph = nx_graph
 
     async def astream(
         self,
         input: List[dict],
-        config=None,
+        config: dict,
         **kwargs,
     ):
         node_input = {}
@@ -170,66 +169,72 @@ class GraphChain(Runnable):
         input.append(results)
         for node in nx.topological_sort(self.graph):
             chain = self.graph.nodes[node]["chain"]
-            node = NodeChain(chain)
-            gen = node.astream(node_input, self.graph, results, lock, config)
+            gen = chain.astream(
+                input=node_input,
+                config=config,
+                graph=self.graph,
+                results=results,
+                lock=lock,
+            )
             async for result in gen:
                 input[-1] = result
                 yield input
 
-
-class NodeChain(Runnable):
-    def __init__(self, chain: Runnable):
-        self.chain = chain
-
     def invoke(
         self,
-        input: dict,
-        graph: nx.DiGraph,
-        results: dict,
-        lock: asyncio.Lock,
-        config=None,
+        input: List[dict],
+        config: dict,
         **kwargs,
     ):
-        return asyncio.run(self.ainvoke(input, graph, results, lock, config))
+        return asyncio.run(self.ainvoke(input, config))
 
     async def ainvoke(
         self,
-        input: dict,
-        graph: nx.DiGraph,
-        results: dict,
-        lock: asyncio.Lock,
-        config=None,
+        input: List[dict],
+        config: dict,
         **kwargs,
     ):
-        result = [
-            res async for res in self.astream(input, graph, results, lock, config)
-        ]
+        result = [res async for res in self.astream(input, config)]
 
         return result[-1]
 
-    async def astream(
+
+class CustomLangGraph(StateGraph):
+    def __init__(
         self,
-        input: dict,
-        graph: nx.DiGraph,
-        results: dict,
-        lock: asyncio.Lock,
-        config=None,
-        **kwargs,
+        config: GraphConfig,
+        examples: dict = {},
+        etc_datasets: dict = {},
+        config_schema: Optional[Type[Any]] = None,
     ):
-        if self.chain.name in results:
-            yield results
+        super().__init__(
+            state_schema=List[dict],
+            config_schema=config_schema,
+        )
 
-        else:
-            parents = list(graph.predecessors(self.chain.name))
-            for parent in parents:
-                _chain = graph.nodes[parent]["chain"]
-                node = NodeChain(_chain)
-                gen = node.astream(input, graph, results, lock, config)
-                async for _ in gen:
-                    yield results
+        self.config = config
+        self.examples = examples
+        self.etc_datasets = etc_datasets
 
-            new_result = await self.chain.ainvoke({**input, **results}, config=config)
-            async with lock:
-                results.update(new_result)
+        nodes = self.config.nodes
+        for node in nodes:
+            node: NodeConfig
+            chain = GraphChain(
+                configs=node.chains,
+                examples=self.examples,
+                etc_datasets=self.etc_datasets,
+            )
 
-            yield results
+            self.add_node(node.name, chain)
+
+        entry_point = self.config.entry_point
+        self.set_entry_point(entry_point)
+
+        edges = self.config.edges
+        for edge in edges:
+            pair = edge.pair
+            if edge.type == "always":
+                self.add_edge(pair[0], pair[1])
+            else:
+                func = transition_registry.get(edge.type)(dest=pair[1], **edge.kwargs)
+                self.add_conditional_edges(pair[0], func)

@@ -29,8 +29,10 @@ def sampling_chain(
                     if len(v) == max_n:
                         _result[k] = v[i]
                     else:
-                        assert len(v) == 1
-                        _result[k] = v[0]
+                        if len(v) == 1:
+                            _result[k] = v[0]
+                        else:
+                            _result[k] = v
                 else:
                     _result[k] = v
             result.append(_result)
@@ -38,12 +40,24 @@ def sampling_chain(
         return result
 
     async def parallel_run(inputs: list, config: RunnableConfig):
-        batch = []
-        for input in inputs:
-            for _ in range(n):
-                batch.append(input)
+        if any(
+            isinstance(v, list) and len(v) > 1
+            for input in inputs
+            for v in input.values()
+        ):
+            response = []
+            for input in inputs:
+                new_input = divide_dict(input)
+                _response = await parallel_run(new_input, config)
+                response.append(_response)
+            
+        else:
+            batch = []
+            for input in inputs:
+                for _ in range(n):
+                    batch.append(input)
 
-        response = await chain.abatch(batch, config)
+            response = await chain.abatch(batch, config)
 
         if isinstance(response[0], dict):
             result = {}

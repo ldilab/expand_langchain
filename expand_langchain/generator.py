@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 
 import yaml
 from expand_langchain.config import Config
-from expand_langchain.graph import Graph
+from expand_langchain.graph import CustomLangGraph
 from expand_langchain.loader import Loader
 from langchain_core.documents import Document
 from pydantic import BaseModel
@@ -40,6 +40,7 @@ class Generator(BaseModel):
     run_name: str = None  # if None, config_path.stem is used
     config_path: Path = None
     config: Config = None
+    cache_dir: Optional[Path] = None
 
     # private variables
     output_dir: Path = None
@@ -47,7 +48,11 @@ class Generator(BaseModel):
     datasets: dict = {}
     target_dataset: dict = {}
     example_dataset: dict = {}
-    graph: Graph = None
+    graph: CustomLangGraph = None
+
+    # pydantic config
+    class Config:
+        arbitrary_types_allowed = True
 
     def __init__(self, **data):
         super().__init__(**data)
@@ -77,6 +82,8 @@ class Generator(BaseModel):
             self.output_dir = Path(f"results/{self.run_name}")
             self.results_dir = self.output_dir / "results"
             self.results_dir.mkdir(parents=True, exist_ok=True)
+        if not self.cache_dir:
+            self.cache_dir = self.results_dir
 
     def _load_api_keys(self):
         api_keys = json.loads(Path(self.api_keys_path).read_text())
@@ -111,11 +118,11 @@ class Generator(BaseModel):
         wandb.config.update(self.config.model_dump())
 
     def _compile_graph(self):
-        self.graph = Graph(
+        self.graph = CustomLangGraph(
             config=self.config.graph,
             examples=self.example_dataset,
             etc_datasets=self.datasets,
-        ).run()
+        ).compile()
 
     def run(
         self,
@@ -160,49 +167,39 @@ class Generator(BaseModel):
         """
         Run the target and save the result as json file
         """
-        done = False
-        id = str(id)
-        if self.do_save:
-            path = self.results_dir / f"{str(id).replace('/', '_')}.json"
-            if path.exists() and not self.rerun:
-                logging.info(f"{id} already exists. Skipping...")
-                try:
-                    result = json.loads(path.read_text())
-                    if "error" in result[0]:
-                        raise Exception("Error in previous run")
-                    done = True
-                except Exception as e:
-                    logging.error(f"Error in loading {id}")
-                    logging.error(format_exc())
+        id = str(id).replace("/", "_")
 
-        if not done:
-            async with sem:
-                if self.langfuse_on:
-                    from langfuse.callback import CallbackHandler
+        async with sem:
+            config = {}
+            config.update(
+                {
+                    "id": id,
+                    "cache_dir": self.cache_dir,
+                    "result_dir": self.results_dir,
+                }
+            )
 
-                    langfuse_handler = CallbackHandler()
-                    config = {"callbacks": [langfuse_handler]}
-                else:
-                    config = {}
+            if self.langfuse_on:
+                from langfuse.callback import CallbackHandler
 
-                config.update({"id": id, "verbose": self.verbose})
+                langfuse_handler = CallbackHandler()
+                config.update({"callbacks": [langfuse_handler]})
 
-                try:
-                    result = await self.graph.ainvoke([target], config=config)
-                    logging.info(f"Done: {id}")
+            try:
+                result = await self.graph.ainvoke(
+                    [target],
+                    config=config,
+                    debug=self.debug,
+                )
+                logging.info(f"Done: {id}")
 
-                except Exception as e:
-                    logging.error(f"Error in running {id}")
-                    logging.error(format_exc())
-                    result = [{"error": format_exc()}]
+            except Exception as e:
+                logging.error(f"Error in running {id}")
+                logging.error(format_exc())
+                result = [{"error": format_exc()}]
 
-                    if self.debug:
-                        raise e
-
-        if self.do_save:
-            self._save_json(id.replace("/", "_"), result)
-            self._save_yaml(id.replace("/", "_"), result)
-            self._save_files(id.replace("/", "_"), result)
+                if self.debug:
+                    raise e
 
         return result
 

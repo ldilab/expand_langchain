@@ -28,19 +28,14 @@ class EdgeConfig(BaseModel):
 class ChainConfig(BaseModel):
     name: str
     dependencies: List[str]
-    input_keys: List[str]
-    key_map: Dict[str, str] = None
-    cache_path: Optional[Path] = None
+    key_map: Dict[str, str] = {}
     type: str
+    output_keys: List[str] = []
+    cache_dir: Optional[str] = None
     kwargs: dict = {}
 
     def __init__(self, **data):
         super().__init__(**data)
-
-        if self.key_map is None:
-            self.key_map = {key: key for key in self.input_keys}
-        else:
-            self.key_map = {**{key: key for key in self.input_keys}, **self.key_map}
 
 
 class NodeConfig(BaseModel):
