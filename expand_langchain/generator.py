@@ -28,7 +28,7 @@ from expand_langchain.transition import *
 class Generator(BaseModel):
     verbose: bool = False
     debug: bool = False
-    do_save: bool = True
+    save_on: bool = True
     api_keys_path: str = "api_keys.json"
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
@@ -40,11 +40,11 @@ class Generator(BaseModel):
     run_name: str = None  # if None, config_path.stem is used
     config_path: Path = None
     config: Config = None
-    cache_dir: Optional[Path] = None
+    cache_root: Optional[Path] = None
 
     # private variables
     output_dir: Path = None
-    results_dir: Path = None
+    result_root: Path = None
     datasets: dict = {}
     target_dataset: dict = {}
     example_dataset: dict = {}
@@ -78,12 +78,12 @@ class Generator(BaseModel):
     def _init_result_dir(self):
         if self.run_name is None:
             self.run_name = self.config_path.stem
-        if self.do_save:
+        if self.save_on:
             self.output_dir = Path(f"results/{self.run_name}")
-            self.results_dir = self.output_dir / "results"
-            self.results_dir.mkdir(parents=True, exist_ok=True)
-        if not self.cache_dir:
-            self.cache_dir = self.results_dir
+            self.result_root = self.output_dir / "results"
+            self.result_root.mkdir(parents=True, exist_ok=True)
+        if not self.cache_root and not self.rerun:
+            self.cache_root = self.result_root
 
     def _load_api_keys(self):
         api_keys = json.loads(Path(self.api_keys_path).read_text())
@@ -170,20 +170,21 @@ class Generator(BaseModel):
         id = str(id).replace("/", "_")
 
         async with sem:
-            config = {}
-            config.update(
-                {
+            config = {
+                "callbacks": [],
+                "tags": [id],
+                "metadata": {
                     "id": id,
-                    "cache_dir": self.cache_dir,
-                    "result_dir": self.results_dir,
-                }
-            )
+                    "cache_root": self.cache_root,
+                    "result_root": self.result_root,
+                },
+            }
 
             if self.langfuse_on:
                 from langfuse.callback import CallbackHandler
 
                 langfuse_handler = CallbackHandler()
-                config.update({"callbacks": [langfuse_handler]})
+                config["callbacks"].append(langfuse_handler)
 
             try:
                 result = await self.graph.ainvoke(
@@ -201,65 +202,20 @@ class Generator(BaseModel):
                 if self.debug:
                     raise e
 
+            self._save_json(id, result)
+
         return result
 
     def _save_json(self, id: str, result: dict):
         """
         Save result as json file
         """
-        path = self.results_dir / f"{id}.json"
+        path = self.result_root / f"{id}.json"
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(self.results_dir / f"{id}.json", "w") as f:
+        with open(self.result_root / f"{id}.json", "w") as f:
             json.dump(result, f, indent=4, ensure_ascii=False)
-
-    def _save_yaml(self, id: str, result: dict):
-        """
-        Save result as yaml file
-        """
-        path = self.results_dir / f"{id}.yaml"
-        if not path.parent.exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(self.results_dir / f"{id}.yaml", "w") as f:
-            yaml.dump(
-                result, f, default_style="|", default_flow_style=False, sort_keys=False
-            )
-
-    def _save_files(self, id: str, result: str):
-        output_dir = self.results_dir / id
-
-        def _rec_save_files(result, dir, key):
-            dir.mkdir(parents=True, exist_ok=True)
-            key = str(key)
-
-            if isinstance(result, str):
-                file = dir / f"{key}.txt"
-                with open(file, "w") as f:
-                    f.write(result)
-                wandb.save(file, base_path=self.results_dir, policy="now")
-            elif isinstance(result, list):
-                for i in range(len(result)):
-                    _rec_save_files(result[i], dir / key, i)
-            elif isinstance(result, dict):
-                for k, v in result.items():
-                    _rec_save_files(v, dir / key, k)
-            elif isinstance(result, Document):
-                file = dir / f"{key}.txt"
-                with open(file, "w") as f:
-                    f.write(result.to_json())
-                wandb.save(file, base_path=self.results_dir, policy="now")
-            else:
-                try:
-                    file = dir / f"{key}.json"
-                    with open(file, "w") as f:
-                        json.dump(result, f, indent=4, ensure_ascii=False)
-                    wandb.save(file, base_path=self.results_dir, policy="now")
-                except Exception as e:
-                    logging.error(f"Error in saving files: {e}")
-
-        _rec_save_files(result, output_dir, "result")
 
     def merge_json(self):
         """

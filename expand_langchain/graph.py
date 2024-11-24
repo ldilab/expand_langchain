@@ -1,8 +1,11 @@
 import asyncio
+import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Type
 
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
+from expand_langchain.utils.cache import load_cache, save_cache
 from expand_langchain.utils.registry import chain_registry, transition_registry
 from langchain_core.runnables import Runnable
 from langgraph.graph import StateGraph
@@ -14,6 +17,7 @@ class NodeChain(BaseModel, Runnable):
     type: str
     key_map: Dict[str, str]
     output_keys: List[str]
+    cache_root: Optional[Path] = None
     examples: dict
     etc_datasets: dict
     kwargs: dict = {}
@@ -45,8 +49,23 @@ class NodeChain(BaseModel, Runnable):
     ):
         if self.key in results:
             yield results
+            return
 
-        else:
+        cache_hit = False
+        cache_root = self.cache_root or config.get("metadata", {}).get("cache_root")
+        if cache_root:
+            langgraph_step = config["metadata"]["langgraph_step"]
+            id = config.get("metadata", {}).get("id")
+            path = cache_root / id / "result" / str(langgraph_step)
+            try:
+                new_result = load_cache(path, self.key)
+                logging.info(f"Loaded cache from {path}")
+                cache_hit = True
+            except FileNotFoundError:
+                logging.info(f"Cache not found: {path}")
+                cache_hit = False
+
+        if not cache_hit:
             parents = list(graph.predecessors(self.key))
             for parent in parents:
                 node = graph.nodes[parent]["chain"]
@@ -69,10 +88,18 @@ class NodeChain(BaseModel, Runnable):
 
             new_result = await self.chain.ainvoke(mapped_data, config=config)
 
-            async with lock:
-                results.update(new_result)
+        result_root = config.get("metadata", {}).get("result_root")
+        if result_root:
+            langgraph_step = config["metadata"]["langgraph_step"]
+            id = config.get("metadata", {}).get("id")
+            path = result_root / id / str(langgraph_step)
+            save_cache(path, self.key, new_result)
+            logging.info(f"Saved cache to {path}")
 
-            yield results
+        async with lock:
+            results.update(new_result)
+
+        yield results
 
     def invoke(
         self,
@@ -130,15 +157,17 @@ class GraphChain(BaseModel, Runnable):
             name = config.name
             dependencies = config.dependencies
             output_keys = config.output_keys
+            cache_root = config.cache_root
             key_map = config.key_map
             type = config.type
             kwargs = config.kwargs or {}
 
             chain = NodeChain(
                 key=name,
-                output_keys=output_keys,
-                key_map=key_map,
                 type=type,
+                key_map=key_map,
+                output_keys=output_keys,
+                cache_root=cache_root,
                 examples=examples,
                 etc_datasets=etc_datasets,
                 kwargs=kwargs,
@@ -205,6 +234,8 @@ class CustomLangGraph(StateGraph):
         config: GraphConfig,
         examples: dict = {},
         etc_datasets: dict = {},
+        cache_root: str = None,
+        result_root: str = None,
         config_schema: Optional[Type[Any]] = None,
     ):
         super().__init__(
@@ -223,6 +254,8 @@ class CustomLangGraph(StateGraph):
                 configs=node.chains,
                 examples=self.examples,
                 etc_datasets=self.etc_datasets,
+                cache_root=cache_root,
+                result_root=result_root,
             )
 
             self.add_node(node.name, chain)

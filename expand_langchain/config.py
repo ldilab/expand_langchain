@@ -31,7 +31,7 @@ class ChainConfig(BaseModel):
     key_map: Dict[str, str] = {}
     type: str
     output_keys: List[str] = []
-    cache_dir: Optional[str] = None
+    cache_root: Optional[Path] = None
     kwargs: dict = {}
 
     def __init__(self, **data):
