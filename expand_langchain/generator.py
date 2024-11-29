@@ -190,7 +190,6 @@ class Generator(BaseModel):
                 result = await self.graph.ainvoke(
                     [target],
                     config=config,
-                    debug=self.debug,
                 )
                 logging.info(f"Done: {id}")
 

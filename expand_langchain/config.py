@@ -30,6 +30,7 @@ class ChainConfig(BaseModel):
     dependencies: List[str]
     key_map: Dict[str, str] = {}
     type: str
+    input_keys: List[str] = []
     output_keys: List[str] = []
     cache_root: Optional[Path] = None
     kwargs: dict = {}

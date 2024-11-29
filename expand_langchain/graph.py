@@ -16,6 +16,7 @@ class NodeChain(BaseModel, Runnable):
     key: str
     type: str
     key_map: Dict[str, str]
+    input_keys: List[str]
     output_keys: List[str]
     cache_root: Optional[Path] = None
     examples: dict
@@ -57,13 +58,16 @@ class NodeChain(BaseModel, Runnable):
             langgraph_step = config["metadata"]["langgraph_step"]
             id = config.get("metadata", {}).get("id")
             path = cache_root / id / "result" / str(langgraph_step)
-            try:
-                new_result = load_cache(path, self.key)
-                logging.info(f"Loaded cache from {path}")
-                cache_hit = True
-            except FileNotFoundError:
-                logging.info(f"Cache not found: {path}")
-                cache_hit = False
+            new_result = {}
+            for k in self.output_keys:
+                try:
+                    new_result[k] = load_cache(path, k)
+                    logging.info(f"Loaded cache from {path}, key: {k}")
+                    cache_hit = True
+                except FileNotFoundError:
+                    logging.info(f"Cache not found: {path}, key: {k}")
+                    cache_hit = False
+                    break
 
         if not cache_hit:
             parents = list(graph.predecessors(self.key))
@@ -82,7 +86,7 @@ class NodeChain(BaseModel, Runnable):
             data = {**input, **results}
 
             mapped_data = {}
-            for k in data.keys():
+            for k in self.input_keys:
                 mapped_key = self.key_map.get(k, k)
                 mapped_data[mapped_key] = data.get(k, None) or self.etc_datasets[k]
 
@@ -92,9 +96,10 @@ class NodeChain(BaseModel, Runnable):
         if result_root:
             langgraph_step = config["metadata"]["langgraph_step"]
             id = config.get("metadata", {}).get("id")
-            path = result_root / id / str(langgraph_step)
-            save_cache(path, self.key, new_result)
-            logging.info(f"Saved cache to {path}")
+            path = result_root / id / "result" / str(langgraph_step)
+            for k, v in new_result.items():
+                save_cache(path, k, v)
+                logging.info(f"Saved result to {path}, key: {k}")
 
         async with lock:
             results.update(new_result)
@@ -156,6 +161,7 @@ class GraphChain(BaseModel, Runnable):
         for config in configs:
             name = config.name
             dependencies = config.dependencies
+            input_keys = config.input_keys
             output_keys = config.output_keys
             cache_root = config.cache_root
             key_map = config.key_map
@@ -166,6 +172,7 @@ class GraphChain(BaseModel, Runnable):
                 key=name,
                 type=type,
                 key_map=key_map,
+                input_keys=input_keys,
                 output_keys=output_keys,
                 cache_root=cache_root,
                 examples=examples,
