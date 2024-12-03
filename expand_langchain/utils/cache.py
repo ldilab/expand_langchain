@@ -18,9 +18,18 @@ def load_cache(path, key):
         with open(path / f"{key}.json", "r") as f:
             return json.load(f)
     elif (path / key).exists():
-        data = {}
+        # if path / key has integer keys, it is a list
+        if all([p.stem.isdigit() for p in (path / key).iterdir()]):
+            data = [None] * len(list((path / key).iterdir()))
+        else:
+            data = {}
+
         for p in (path / key).iterdir():
-            data[p.stem] = load_cache(path / key, p.stem)
+            if p.stem.isdigit():
+                data[int(p.stem)] = load_cache(path / key, p.stem)
+            else:
+                data[p.stem] = load_cache(path / key, p.stem)
+
         return data
     else:
         raise FileNotFoundError(f"Cache not found: {path / key}")
