@@ -8,10 +8,9 @@ from typing import Any
 import yaml
 from datasets import Dataset, load_dataset
 from elasticsearch import Elasticsearch, helpers
+from expand_langchain.config import Config, DatasetConfig, SourceConfig
 from pydantic import BaseModel
 from tqdm import tqdm
-
-from expand_langchain.config import Config, DatasetConfig, SourceConfig
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +83,12 @@ class Loader(BaseModel):
                 data_yaml = yaml.load(Path(path).read_text(), Loader=yaml.FullLoader)
                 sources[name] = Dataset.from_list(data_yaml).sort(sort_key)
 
+            elif source.type in ["csv", "tsv"]:
+                path = source.kwargs.get("path")
+                sort_key = source.kwargs.get("sort_key")
+                data_csv = Dataset.from_csv(path)
+                sources[name] = data_csv.sort(sort_key)
+
             elif source.type == "postgresql":
                 import psycopg2
 
@@ -97,6 +102,7 @@ class Loader(BaseModel):
 
             elif source.type == "user_input":
                 sources[name] = None
+                
             else:
                 raise ValueError(f"Unsupported source type: {source.type}")
 
@@ -177,8 +183,11 @@ def _load_dict(
     for i, id in tqdm(enumerate(ids)):
         result[id] = {}
         for field in fields:
-            source = sources[field.get("source")]
-            result[id][field.get("name")] = source[i][field.get("key")]
+            if "value" in field:
+                result[id][field.get("name")] = field.get("value")
+            else:
+                source = sources[field.get("source")]
+                result[id][field.get("name")] = source[i][field.get("key")]
 
     if custom_lambda is not None:
         try:
