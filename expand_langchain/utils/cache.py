@@ -2,9 +2,8 @@ import json
 import logging
 from pathlib import Path
 
-from langchain.callbacks.base import BaseCallbackHandler
 from langchain_core.documents import Document
-from pydantic import BaseModel
+from langchain_elasticsearch import ElasticsearchStore
 
 
 def load_cache(path, key):
@@ -35,10 +34,25 @@ def load_cache(path, key):
         raise FileNotFoundError(f"Cache not found: {path / key}")
 
 
+def remove_cache(path, key):
+    path = Path(path)
+    key = str(key).replace("/", "_")
+
+    if (path / f"{key}.txt").exists():
+        (path / f"{key}.txt").unlink()
+    elif (path / f"{key}.json").exists():
+        (path / f"{key}.json").unlink()
+    elif (path / key).exists():
+        for p in (path / key).iterdir():
+            remove_cache(path / key, p.stem)
+        (path / key).rmdir()
+
 def save_cache(path, key, data):
     path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
     key = str(key).replace("/", "_")
+
+    remove_cache(path, key)
+    path.mkdir(parents=True, exist_ok=True)
 
     if isinstance(data, str):
         path = path / f"{key}.txt"
@@ -54,6 +68,9 @@ def save_cache(path, key, data):
         path = path / f"{key}.txt"
         with open(path, "w") as f:
             f.write(data.to_json())
+    elif isinstance(data, ElasticsearchStore):
+        logging.info("ElasticsearchStore is not saved.")
+        pass
     else:
         try:
             path = path / f"{key}.json"

@@ -12,25 +12,19 @@ from langgraph.graph import StateGraph
 from pydantic import BaseModel
 
 
-class NodeChain(BaseModel, Runnable):
-    key: str
-    type: str
-    key_map: Dict[str, str]
-    input_keys: List[str]
-    output_keys: List[str]
-    cache_root: Optional[Path] = None
-    examples: dict
-    etc_datasets: dict
-    kwargs: dict = {}
-
-    chain: Runnable = None
-
-    # pydantic config
-    class Config:
-        arbitrary_types_allowed = True
-
+class NodeChain(Runnable):
     def __init__(self, **data):
-        super().__init__(**data)
+        super().__init__()
+
+        self.key = data.get("key")
+        self.type = data.get("type")
+        self.key_map = data.get("key_map", {})
+        self.input_keys = data.get("input_keys", [])
+        self.output_keys = data.get("output_keys", [])
+        self.cache_root = data.get("cache_root")
+        self.examples = data.get("examples", {})
+        self.etc_datasets = data.get("etc_datasets", {})
+        self.kwargs = data.get("kwargs", {})
 
         self.name = "NodeChain"
         self.chain = chain_registry[self.type](
@@ -140,12 +134,7 @@ class NodeChain(BaseModel, Runnable):
         return result[-1]
 
 
-class GraphChain(BaseModel, Runnable):
-    graph: nx.DiGraph = None
-
-    class Config:
-        arbitrary_types_allowed = True
-
+class GraphChain(Runnable):
     def __init__(
         self,
         configs: List[ChainConfig],
@@ -153,7 +142,7 @@ class GraphChain(BaseModel, Runnable):
         etc_datasets: dict = {},
         **data,
     ):
-        super().__init__(**data)
+        super().__init__()
 
         self.name = "GraphChain"
 

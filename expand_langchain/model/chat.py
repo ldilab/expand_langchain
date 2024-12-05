@@ -18,7 +18,7 @@ class GeneralChatModel(BaseChatModel):
     temperature: float
     top_p: float
     num_ctx: Optional[int] = None
-    max_retries: int = 10
+    max_retries: int = 1000000
     platform: str = "azure"
     stop: Optional[List[str]] = None
     base_url: Optional[str] = None
@@ -47,7 +47,7 @@ class GeneralChatModel(BaseChatModel):
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                model_kwargs={"top_p": self.top_p},
+                top_p=self.top_p,
                 max_retries=self.max_retries,
             )
 

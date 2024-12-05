@@ -213,8 +213,15 @@ class Generator(BaseModel):
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
 
+        class CustomEncoder(json.JSONEncoder):
+            def default(self, obj):
+                try:
+                    return super().default(obj)
+                except TypeError:
+                    return "Not serializable"
+
         with open(self.result_root / f"{id}.json", "w") as f:
-            json.dump(result, f, indent=4, ensure_ascii=False)
+            json.dump(result, f, indent=4, cls=CustomEncoder, ensure_ascii=False)
 
     def merge_json(self):
         """
