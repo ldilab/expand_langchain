@@ -298,6 +298,8 @@ class Generator(BaseModel):
 
         import requests
 
+        msg = f"{self.run_name}: {msg}"
+
         requests.post(
             webhook,
             json={"msg_type": "text", "content": {"text": msg}},

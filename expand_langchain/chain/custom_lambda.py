@@ -35,4 +35,4 @@ def custom_lambda_chain(
 
         return result
 
-    return RunnableLambda(_func, name="custom_lambda")
+    return RunnableLambda(_func, name=key)
