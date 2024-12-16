@@ -102,7 +102,7 @@ class Loader(BaseModel):
 
             elif source.type == "user_input":
                 sources[name] = None
-                
+
             else:
                 raise ValueError(f"Unsupported source type: {source.type}")
 

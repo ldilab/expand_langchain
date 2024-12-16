@@ -6,6 +6,7 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Any, List, Optional
 
+import wandb
 import yaml
 from expand_langchain.config import Config
 from expand_langchain.graph import CustomLangGraph
@@ -13,8 +14,6 @@ from expand_langchain.loader import Loader
 from langchain_core.documents import Document
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
-
-import wandb
 
 """registry """
 from expand_langchain.utils import registry  # isort:skip
@@ -29,7 +28,11 @@ class Generator(BaseModel):
     verbose: bool = False
     debug: bool = False
     save_on: bool = True
+    user_input_mode: bool = False
+
     api_keys_path: str = "api_keys.json"
+    api_keys: Optional[dict] = None
+
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
     wandb_on: bool = False
@@ -86,16 +89,27 @@ class Generator(BaseModel):
             self.cache_root = self.result_root
 
     def _load_api_keys(self):
-        api_keys = json.loads(Path(self.api_keys_path).read_text())
-        for k, v in api_keys.items():
-            os.environ[k] = v
+        if self.api_keys_path and Path(self.api_keys_path).exists():
+            api_keys = json.loads(Path(self.api_keys_path).read_text())
+            for k, v in api_keys.items():
+                os.environ[k] = v
+
+        if self.api_keys:
+            for k, v in self.api_keys.items():
+                os.environ[k] = v
+
+        if not (self.api_keys_path or self.api_keys):
+            logging.warning("No api keys are loaded")
 
     def _load_datasets(self):
         loader = Loader(config=self.config)
         self.datasets = loader.run().result
-        self.target_dataset = self.datasets.get(self.target_dataset_name, {})
+
+        if not self.user_input_mode:
+            self.target_dataset = self.datasets.get(self.target_dataset_name, {})
+            del self.datasets[self.target_dataset_name]
+
         self.example_dataset = self.datasets.get(self.example_dataset_name, {})
-        del self.datasets[self.target_dataset_name]
         if self.example_dataset_name in self.datasets:
             del self.datasets[self.example_dataset_name]
 
@@ -284,6 +298,12 @@ class Generator(BaseModel):
         async for result in gen:
             if result["event"] == "on_chain_end":
                 yield result["data"]["output"]
+
+    def run_user_input(
+        self,
+        inputs: List[dict],
+    ):
+        return self.graph.invoke(inputs)
 
     def lark_message(
         self,
