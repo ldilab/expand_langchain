@@ -87,7 +87,7 @@ class NodeChain(Runnable):
             new_result = await self.chain.ainvoke(mapped_data, config=config)
 
         result_root = config.get("metadata", {}).get("result_root")
-        if result_root:
+        if result_root and not cache_hit:
             langgraph_step = config["metadata"]["langgraph_step"]
             id = config.get("metadata", {}).get("id")
             path = result_root / id / "result" / str(langgraph_step)
