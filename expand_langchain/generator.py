@@ -6,7 +6,6 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Any, List, Optional
 
-import wandb
 import yaml
 from expand_langchain.config import Config
 from expand_langchain.graph import CustomLangGraph
@@ -31,7 +30,6 @@ class Generator(BaseModel):
     user_input_mode: bool = False
 
     api_keys_path: str = "api_keys.json"
-    api_keys: Optional[dict] = None
 
     target_dataset_name: str = "target"
     example_dataset_name: str = "example"
@@ -92,14 +90,9 @@ class Generator(BaseModel):
         if self.api_keys_path and Path(self.api_keys_path).exists():
             api_keys = json.loads(Path(self.api_keys_path).read_text())
             for k, v in api_keys.items():
-                os.environ[k] = v
-
-        if self.api_keys:
-            for k, v in self.api_keys.items():
-                os.environ[k] = v
-
-        if not (self.api_keys_path or self.api_keys):
-            logging.warning("No api keys are loaded")
+                if not os.environ.get(k, None):
+                    logging.warning(f"Set {k} from api_keys file")
+                    os.environ[k] = v
 
     def _load_datasets(self):
         loader = Loader(config=self.config)

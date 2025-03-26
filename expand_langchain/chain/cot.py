@@ -22,26 +22,14 @@ def cot_chain(
             **kwargs,
         )
         parser = parser_chain(**kwargs)
-        try:
-            result = await chain.ainvoke(data, config=config)
-        except Exception as e:
-            return {
-                f"error": traceback.format_exc(),
-            }
+        result = await chain.ainvoke(data, config=config)
 
-        try:
-            parsed_result = parser.invoke(result, config=config)
+        parsed_result = parser.invoke(result, config=config)
 
-            return {
-                f"{key}_raw": result,
-                key: parsed_result,
-            }
-
-        except Exception as e:
-            return {
-                f"{key}_raw": result,
-                f"error": traceback.format_exc(),
-            }
+        return {
+            f"{key}_raw": result,
+            key: parsed_result,
+        }
 
     chain = RunnableLambda(_func)
 

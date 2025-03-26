@@ -37,9 +37,12 @@ class Loader(BaseModel):
             pass
 
     def _load_api_keys(self):
-        api_keys = json.loads(Path(self.api_keys_path).read_text())
-        for k, v in api_keys.items():
-            os.environ[k] = v
+        if self.api_keys_path and Path(self.api_keys_path).exists():
+            api_keys = json.loads(Path(self.api_keys_path).read_text())
+            for k, v in api_keys.items():
+                if not os.environ.get(k, None):
+                    logging.warning(f"Set {k} from api_keys file")
+                    os.environ[k] = v
 
     def run(self):
         sources = self.load_sources()

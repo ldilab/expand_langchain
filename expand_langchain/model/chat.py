@@ -2,6 +2,7 @@ import logging
 import os
 from typing import Any, List, Optional
 
+from expand_langchain.model.custom_api.snowflake import ChatSnowflakeCortex
 from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
 from langchain.schema import BaseMessage, ChatResult
@@ -86,6 +87,22 @@ class GeneralChatModel(BaseChatModel):
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_retries=self.max_retries,
+            )
+
+        elif self.platform == "snowflake":
+            return ChatSnowflakeCortex(
+                model=self.model,
+                cortex_function="complete",
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                top_p=self.top_p,
+                account=os.environ.get("SNOWFLAKE_ACCOUNT"),
+                username=os.environ.get("SNOWFLAKE_USERNAME"),
+                password=os.environ.get("SNOWFLAKE_PASSWORD"),
+                database=os.environ.get("SNOWFLAKE_DATABASE"),
+                schema=os.environ.get("SNOWFLAKE_SCHEMA"),
+                role=os.environ.get("SNOWFLAKE_ROLE"),
+                warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE"),
             )
 
         else:
