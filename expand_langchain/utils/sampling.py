@@ -50,7 +50,7 @@ def sampling_chain(
                 new_input = divide_dict(input)
                 _response = await parallel_run(new_input, config)
                 response.append(_response)
-            
+
         else:
             batch = []
             for input in inputs:
@@ -59,12 +59,14 @@ def sampling_chain(
 
             response = await chain.abatch(batch, config)
 
+            if isinstance(response[0], dict):
+                response = [
+                    merge_dicts(response[i * n : (i + 1) * n])
+                    for i in range(len(response) // n)
+                ]
+
         if isinstance(response[0], dict):
-            result = {}
-            for k in response[0].keys():
-                result[k] = [r[k] for r in response]
-                if flatten and isinstance(result[k][0], list):
-                    result[k] = [item for sublist in result[k] for item in sublist]
+            result = merge_dicts(response, flatten=flatten)
 
             return result
         else:
@@ -72,5 +74,20 @@ def sampling_chain(
 
     result = RunnableLambda(divide_dict) | RunnableLambda(parallel_run)
     result.name = "sampling_chain"
+
+    return result
+
+
+def merge_dicts(dicts: List[dict], flatten=False) -> dict:
+    result = {}
+    for d in dicts:
+        for k, v in d.items():
+            if k not in result:
+                result[k] = []
+            result[k].append(v)
+
+    if flatten:
+        for k in result.keys():
+            result[k] = [item for sublist in result[k] for item in sublist]
 
     return result

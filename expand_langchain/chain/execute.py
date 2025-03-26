@@ -1,6 +1,6 @@
 import os
 from itertools import zip_longest
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from expand_langchain.utils.registry import chain_registry
 from langchain_community.utilities.requests import JsonRequestsWrapper
@@ -13,49 +13,40 @@ def execute_chain(
     code_key: str,
     testcase_key: Optional[str] = None,
     stdin_key: Optional[str] = None,
+    is_direct_stdin: Optional[bool] = False,
     **kwargs,
 ):
     def _func(data, config={}):
+        code: List[str] = data[code_key]
+        testcase: Union[List[str], List[dict]] = data.get(testcase_key, [])
+        if is_direct_stdin:
+            stdin = testcase
+        else:
+            stdin = [x.get(stdin_key, "") for x in testcase]
+
         result = {}
         result[key] = []
-        for target, testcase in zip_longest(
-            data[code_key],
-            data.get(testcase_key, []),
-            fillvalue={},
-        ):
-            if isinstance(target, str):
-                response = JsonRequestsWrapper().post(
-                    os.environ["CODEEXEC_ENDPOINT"],
-                    data={
-                        "code": target,
-                        "stdin": testcase.get(stdin_key, ""),
-                        **kwargs,
-                    },
-                )
-                output = response["output"]
-                result[key].append(output)
-
-            elif isinstance(target, list):
-                outputs = []
-                for _target, _testcase in zip_longest(
-                    target,
-                    testcase,
-                    fillvalue={},
-                ):
-                    response = JsonRequestsWrapper().post(
-                        os.environ["CODEEXEC_ENDPOINT"],
-                        data={
-                            "code": _target,
-                            "stdin": _testcase.get(stdin_key, ""),
-                            **kwargs,
-                        },
-                    )
-                    output = response["output"]
-                    outputs.append(output)
-                result[key].append(outputs)
-            else:
-                raise ValueError("Invalid input type")
+        for _c in code:
+            _r = []
+            for s in stdin:
+                output = send_code_to_codeexec(_c, s)
+                _r.append(output)
+            result[key].append(_r)
 
         return result
 
     return RunnableLambda(_func, name="execute")
+
+
+def send_code_to_codeexec(code: str, stdin: str = ""):
+    response = JsonRequestsWrapper().post(
+        os.environ["CODEEXEC_ENDPOINT"],
+        data={
+            "code": code,
+            "stdin": stdin,
+        },
+    )
+
+    response["output"] = response["output"].replace("Exit Code: 0", "")
+
+    return response["output"]
