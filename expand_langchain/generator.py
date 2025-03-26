@@ -12,7 +12,11 @@ from expand_langchain.graph import CustomLangGraph
 from expand_langchain.loader import Loader
 from langchain_core.documents import Document
 from pydantic import BaseModel
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import PlainScalarString
 from tqdm.asyncio import tqdm_asyncio
+
+import wandb
 
 """registry """
 from expand_langchain.utils import registry  # isort:skip
@@ -21,6 +25,26 @@ from expand_langchain.model import *
 from expand_langchain.parser import *
 from expand_langchain.prompt import *
 from expand_langchain.transition import *
+
+
+def pretty_yaml_dump(data, path):
+    def _long_string_representer(dumper, data):
+        data = data.replace("\r", "")
+        data = PlainScalarString(data)
+
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+
+    def _default_representer(dumper, data):
+        data = str(data)
+        return _long_string_representer(dumper, data)
+
+    yaml = YAML()
+    yaml.default_flow_style = False
+    yaml.representer.add_representer(object, _default_representer)
+    yaml.representer.add_representer(str, _long_string_representer)
+
+    with open(path, "w") as f:
+        yaml.dump(data, f)
 
 
 class Generator(BaseModel):
@@ -230,6 +254,16 @@ class Generator(BaseModel):
         with open(self.result_root / f"{id}.json", "w") as f:
             json.dump(result, f, indent=4, cls=CustomEncoder, ensure_ascii=False)
 
+    def _save_yaml(self, id: str, result: dict):
+        """
+        Save result as yaml file
+        """
+        path = self.result_root / f"{id}.yaml"
+        if not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+        pretty_yaml_dump(result, path)
+
     def merge_json(self):
         """
         Merge json files distributed by problem into one file
@@ -264,6 +298,9 @@ class Generator(BaseModel):
             filename = f"{self.output_dir}/results_merged_{i}.json"
             with open(filename, "w") as f:
                 json.dump(dump_data, f, indent=4, ensure_ascii=False)
+
+            filename = f"{self.output_dir}/results_merged_{i}.yaml"
+            pretty_yaml_dump(dump_data, filename)
 
         return self
 
