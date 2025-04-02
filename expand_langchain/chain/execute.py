@@ -47,6 +47,7 @@ def send_code_to_codeexec(code: str, stdin: str = ""):
         },
     )
 
-    response["output"] = response["output"].replace("Exit Code: 0", "")
-
-    return response["output"]
+    try:
+        return response["output"].replace("Exit Code: 0", "")
+    except Exception:
+        return str(response)

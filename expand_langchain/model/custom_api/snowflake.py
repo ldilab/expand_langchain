@@ -1,22 +1,14 @@
+import base64
 import json
 from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    ChatMessage,
-    HumanMessage,
-    SystemMessage,
-)
+from langchain_core.messages import (AIMessage, BaseMessage, ChatMessage,
+                                     HumanMessage, SystemMessage)
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.utils import (
-    convert_to_secret_str,
-    get_from_dict_or_env,
-    get_pydantic_field_names,
-    pre_init,
-)
+from langchain_core.utils import (convert_to_secret_str, get_from_dict_or_env,
+                                  get_pydantic_field_names, pre_init)
 from langchain_core.utils.utils import _build_model_kwargs
 from pydantic import Field, SecretStr, model_validator
 
@@ -29,6 +21,26 @@ SUPPORTED_ROLES: List[str] = [
 
 class ChatSnowflakeCortexError(Exception):
     """Error with Snowpark client."""
+
+
+def _convert_obj_to_sql_string(obj: Any) -> str:
+    if isinstance(obj, str):
+        s = obj.replace("'", "''")
+        return f"'{s}'"
+    elif isinstance(obj, dict):
+        s = "{"
+        for k, v in obj.items():
+            s += f"'{k}': {_convert_obj_to_sql_string(v)},"
+        s = s[:-1] + "}"
+        return s
+    elif isinstance(obj, list):
+        s = "["
+        for v in obj:
+            s += f"{_convert_obj_to_sql_string(v)},"
+        s = s[:-1] + "]"
+        return s
+    else:
+        return json.dumps(obj).replace("'", "''")
 
 
 def _convert_message_to_dict(message: BaseMessage) -> dict:
@@ -200,17 +212,24 @@ class ChatSnowflakeCortex(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         message_dicts = [_convert_message_to_dict(m) for m in messages]
-        message_str = str(message_dicts)
+
         options = {"temperature": self.temperature}
         if self.top_p is not None:
             options["top_p"] = self.top_p
         if self.max_tokens is not None:
             options["max_tokens"] = self.max_tokens
-        options_str = str(options)
+
+        model_str = self.model
+        messages_str = _convert_obj_to_sql_string(message_dicts)
+        options_str = _convert_obj_to_sql_string(options)
+
         sql_stmt = f"""
-            select snowflake.cortex.{self.cortex_function}(
-                '{self.model}'
-                ,{message_str},{options_str}) as llm_response;"""
+            SELECT snowflake.cortex.complete(
+                '{model_str}', 
+                {messages_str}, 
+                {options_str}
+            ) AS llm_response;
+        """
 
         try:
             l_rows = self.sp_session.sql(sql_stmt).collect()

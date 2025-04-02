@@ -12,6 +12,8 @@ def code_block_runner(list_all: bool = False) -> RunnableLambda:
         match = re.search(pattern, input, re.DOTALL)
         if match:
             matches = re.findall(pattern, input, re.DOTALL)
+            matches = [m for m in matches if m.strip()]
+
             if matches:
                 if list_all:
                     return matches
