@@ -18,17 +18,31 @@ def execute_chain(
 ):
     def _func(data, config={}):
         code: List[str] = data[code_key]
+        if isinstance(code, list) and len(code) == 1 and isinstance(code[0], list):
+            code = code[0]
+
         testcase: Union[List[str], List[dict]] = data.get(testcase_key, [])
         if is_direct_stdin:
             stdin = testcase
+            if (
+                isinstance(stdin, list)
+                and len(stdin) == 1
+                and isinstance(stdin[0], list)
+            ):
+                stdin = stdin[0]
         else:
             stdin = [x.get(stdin_key, "") for x in testcase]
 
         result = {}
         result[key] = []
         for _c in code:
+            if isinstance(_c, list) and len(_c) == 1 and isinstance(_c[0], str):
+                _c = _c[0]
+
             _r = []
             for s in stdin:
+                if isinstance(s, list) and len(s) == 1 and isinstance(s[0], list):
+                    s = s[0]
                 output = send_code_to_codeexec(_c, s)
                 _r.append(output)
             result[key].append(_r)

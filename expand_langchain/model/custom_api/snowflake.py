@@ -4,11 +4,20 @@ from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import (AIMessage, BaseMessage, ChatMessage,
-                                     HumanMessage, SystemMessage)
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    ChatMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.utils import (convert_to_secret_str, get_from_dict_or_env,
-                                  get_pydantic_field_names, pre_init)
+from langchain_core.utils import (
+    convert_to_secret_str,
+    get_from_dict_or_env,
+    get_pydantic_field_names,
+    pre_init,
+)
 from langchain_core.utils.utils import _build_model_kwargs
 from pydantic import Field, SecretStr, model_validator
 
@@ -123,6 +132,8 @@ class ChatSnowflakeCortex(BaseChatModel):
         cumulative probabilities. Value should be ranging between 0.0 and 1.0. 
     """
 
+    max_retries: int = 10
+
     snowflake_username: Optional[str] = Field(default=None, alias="username")
     """Automatically inferred from env var `SNOWFLAKE_USERNAME` if not provided."""
     snowflake_password: Optional[SecretStr] = Field(default=None, alias="password")
@@ -231,12 +242,17 @@ class ChatSnowflakeCortex(BaseChatModel):
             ) AS llm_response;
         """
 
-        try:
-            l_rows = self.sp_session.sql(sql_stmt).collect()
-        except Exception as e:
-            raise ChatSnowflakeCortexError(
-                f"Error while making request to Snowflake Cortex via Snowpark: {e}"
-            )
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                l_rows = self.sp_session.sql(sql_stmt).collect()
+                break
+            except Exception as e:
+                retries += 1
+                if retries >= self.max_retries:
+                    raise ChatSnowflakeCortexError(
+                        f"Error while making request to Snowflake Cortex via Snowpark after {self.max_retries} retries: {e}"
+                    )
 
         response = json.loads(l_rows[0]["LLM_RESPONSE"])
         ai_message_content = response["choices"][0]["messages"]
