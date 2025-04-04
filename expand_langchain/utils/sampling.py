@@ -67,7 +67,7 @@ def sampling_chain(
                 if isinstance(response, list) and len(response) == 1:
                     response = response[0]
 
-        if isinstance(response[0], dict):
+        if isinstance(response, list) and isinstance(response[0], dict):
             result = merge_dicts(response, flatten=flatten)
 
             return result
