@@ -64,8 +64,10 @@ def sampling_chain(
                     merge_dicts(response[i * n : (i + 1) * n])
                     for i in range(len(response) // n)
                 ]
+                if isinstance(response, list) and len(response) == 1:
+                    response = response[0]
 
-        if isinstance(response[0], dict):
+        if isinstance(response, list) and isinstance(response[0], dict):
             result = merge_dicts(response, flatten=flatten)
 
             return result
