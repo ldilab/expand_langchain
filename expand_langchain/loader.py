@@ -62,13 +62,18 @@ class Loader(BaseModel):
                 split = source.kwargs.get("split")
                 load_dataset_kwargs = source.kwargs.get("load_dataset_kwargs", {})
                 dataset = load_dataset(path, **load_dataset_kwargs)[split]
+                if sort_key not in dataset.column_names:
+                    dataset = dataset.add_column(sort_key, list(range(len(dataset))))
                 sources[name] = dataset.sort(sort_key)
 
             elif source.type == "json":
                 path = source.kwargs.get("path")
                 sort_key = source.kwargs.get("sort_key")
                 data_json = json.loads(Path(path).read_text())
-                sources[name] = Dataset.from_list(data_json).sort(sort_key)
+                dataset = Dataset.from_list(data_json)
+                if sort_key not in dataset.column_names:
+                    dataset = dataset.add_column(sort_key, list(range(len(dataset))))
+                sources[name] = dataset.sort(sort_key)
 
             elif source.type == "jsonl":
                 path = source.kwargs.get("path")
@@ -78,19 +83,27 @@ class Loader(BaseModel):
                     for line in Path(path).read_text().split("\n")
                     if line
                 ]
-                sources[name] = Dataset.from_list(data_jsonl).sort(sort_key)
+                dataset = Dataset.from_list(data_jsonl)
+                if sort_key not in dataset.column_names:
+                    dataset = dataset.add_column(sort_key, list(range(len(dataset))))
+                sources[name] = dataset.sort(sort_key)
 
             elif source.type == "yaml":
                 path = source.kwargs.get("path")
                 sort_key = source.kwargs.get("sort_key")
                 data_yaml = yaml.load(Path(path).read_text(), Loader=yaml.FullLoader)
-                sources[name] = Dataset.from_list(data_yaml).sort(sort_key)
+                dataset = Dataset.from_list(data_yaml)
+                if sort_key not in dataset.column_names:
+                    dataset = dataset.add_column(sort_key, list(range(len(dataset))))
+                sources[name] = dataset.sort(sort_key)
 
             elif source.type in ["csv", "tsv"]:
                 path = source.kwargs.get("path")
                 sort_key = source.kwargs.get("sort_key")
-                data_csv = Dataset.from_csv(path)
-                sources[name] = data_csv.sort(sort_key)
+                dataset = Dataset.from_csv(path)
+                if sort_key not in dataset.column_names:
+                    dataset = dataset.add_column(sort_key, list(range(len(dataset))))
+                sources[name] = dataset.sort(sort_key)
 
             elif source.type == "postgresql":
                 import psycopg2

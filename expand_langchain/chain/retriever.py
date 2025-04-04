@@ -1,7 +1,6 @@
 import os
 from typing import List
 
-from elasticsearch import helpers as es_helpers
 from expand_langchain.utils.registry import chain_registry
 from langchain_core.runnables import RunnableLambda
 
