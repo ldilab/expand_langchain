@@ -1,5 +1,6 @@
 import json
 import logging
+from datetime import date
 from pathlib import Path
 
 from langchain_core.documents import Document
@@ -47,6 +48,7 @@ def remove_cache(path, key):
             remove_cache(path / key, p.stem)
         (path / key).rmdir()
 
+
 def save_cache(path, key, data):
     path = Path(path)
     key = str(key).replace("/", "_")
@@ -71,6 +73,10 @@ def save_cache(path, key, data):
     elif isinstance(data, ElasticsearchStore):
         logging.info("ElasticsearchStore is not saved.")
         pass
+    elif isinstance(data, date):
+        path = path / f"{key}.txt"
+        with open(path, "w") as f:
+            f.write(data.isoformat())
     else:
         try:
             path = path / f"{key}.json"

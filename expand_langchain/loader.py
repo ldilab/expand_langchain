@@ -133,6 +133,10 @@ class Loader(BaseModel):
             if dataset.type == "dict":
                 result = _load_dict(sources, **dataset.kwargs)
 
+            elif dataset.type == "json":
+                path = dataset.kwargs.get("path")
+                result = json.loads(Path(path).read_text())
+
             elif dataset.type == "db-schema":
                 if dataset.remove and not dataset.kwargs.get("rerun"):
                     continue
