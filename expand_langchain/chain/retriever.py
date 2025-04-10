@@ -25,10 +25,14 @@ def retriever_chain(
             )
 
             def search(query):
-                response = es.search(
-                    index=index_name,
-                    body=query,
-                )
+                try:
+                    response = es.search(
+                        index=index_name,
+                        body=query,
+                    )
+                except Exception as e:
+                    return []
+
                 return response["hits"]["hits"]
 
             retriever = RunnableLambda(search, name="elasticsearch_retriever")
