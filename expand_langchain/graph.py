@@ -82,7 +82,7 @@ class NodeChain(Runnable):
             mapped_data = {}
             for k in self.input_keys:
                 mapped_key = self.key_map.get(k, k)
-                mapped_data[mapped_key] = data.get(k, None) or self.etc_datasets[k]
+                mapped_data[mapped_key] = data.get(k, None) or self.etc_datasets.get(k, None)
 
             new_result = await self.chain.ainvoke(mapped_data, config=config)
 
