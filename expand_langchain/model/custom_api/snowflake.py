@@ -35,6 +35,7 @@ class ChatSnowflakeCortexError(Exception):
 def _convert_obj_to_sql_string(obj: Any) -> str:
     if isinstance(obj, str):
         s = obj.replace("'", "''")
+        s = s.replace("\\", "\\\\")
         return f"'{s}'"
     elif isinstance(obj, dict):
         s = "{"

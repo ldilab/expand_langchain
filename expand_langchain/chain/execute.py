@@ -56,7 +56,7 @@ def send_code_to_codeexec(code: str, stdin: str = ""):
     response = JsonRequestsWrapper().post(
         os.environ["CODEEXEC_ENDPOINT"],
         data={
-            "code": code,
+            "code": "from typing import *\n" + code,
             "stdin": stdin,
         },
     )
