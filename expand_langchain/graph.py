@@ -20,7 +20,7 @@ class NodeChain(Runnable):
         self.type = data.get("type")
         self.key_map = data.get("key_map", {})
         self.input_keys = data.get("input_keys", [])
-        self.output_keys = data.get("output_keys", [])
+        self.output_keys = data.get("output_keys") or [self.key]
         self.cache_root = data.get("cache_root")
         self.examples = data.get("examples", {})
         self.etc_datasets = data.get("etc_datasets", {})
@@ -82,7 +82,11 @@ class NodeChain(Runnable):
             mapped_data = {}
             for k in self.input_keys:
                 mapped_key = self.key_map.get(k, k)
-                mapped_data[mapped_key] = data.get(k, None) or self.etc_datasets[k]
+                _data = data.get(k, None)
+                if _data is not None:
+                    mapped_data[mapped_key] = _data
+                else:
+                    mapped_data[mapped_key] = self.etc_datasets.get(k, None)
 
             new_result = await self.chain.ainvoke(mapped_data, config=config)
 

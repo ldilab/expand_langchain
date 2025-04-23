@@ -64,7 +64,9 @@ class Loader(BaseModel):
                 dataset = load_dataset(path, **load_dataset_kwargs)[split]
                 if sort_key not in dataset.column_names:
                     dataset = dataset.add_column(sort_key, list(range(len(dataset))))
-                sources[name] = dataset.sort(sort_key)
+                else:
+                    dataset = dataset.sort(sort_key)
+                sources[name] = dataset
 
             elif source.type == "json":
                 path = source.kwargs.get("path")
@@ -73,7 +75,9 @@ class Loader(BaseModel):
                 dataset = Dataset.from_list(data_json)
                 if sort_key not in dataset.column_names:
                     dataset = dataset.add_column(sort_key, list(range(len(dataset))))
-                sources[name] = dataset.sort(sort_key)
+                else:
+                    dataset = dataset.sort(sort_key)
+                sources[name] = dataset
 
             elif source.type == "jsonl":
                 path = source.kwargs.get("path")
@@ -86,7 +90,9 @@ class Loader(BaseModel):
                 dataset = Dataset.from_list(data_jsonl)
                 if sort_key not in dataset.column_names:
                     dataset = dataset.add_column(sort_key, list(range(len(dataset))))
-                sources[name] = dataset.sort(sort_key)
+                else:
+                    dataset = dataset.sort(sort_key)
+                sources[name] = dataset
 
             elif source.type == "yaml":
                 path = source.kwargs.get("path")
@@ -95,7 +101,9 @@ class Loader(BaseModel):
                 dataset = Dataset.from_list(data_yaml)
                 if sort_key not in dataset.column_names:
                     dataset = dataset.add_column(sort_key, list(range(len(dataset))))
-                sources[name] = dataset.sort(sort_key)
+                else:
+                    dataset = dataset.sort(sort_key)
+                sources[name] = dataset
 
             elif source.type in ["csv", "tsv"]:
                 path = source.kwargs.get("path")
@@ -103,7 +111,9 @@ class Loader(BaseModel):
                 dataset = Dataset.from_csv(path)
                 if sort_key not in dataset.column_names:
                     dataset = dataset.add_column(sort_key, list(range(len(dataset))))
-                sources[name] = dataset.sort(sort_key)
+                else:
+                    dataset = dataset.sort(sort_key)
+                sources[name] = dataset
 
             elif source.type == "postgresql":
                 import psycopg2
@@ -136,6 +146,10 @@ class Loader(BaseModel):
             elif dataset.type == "json":
                 path = dataset.kwargs.get("path")
                 result = json.loads(Path(path).read_text())
+
+            elif dataset.type == "yaml":
+                path = dataset.kwargs.get("path")
+                result = yaml.load(Path(path).read_text(), Loader=yaml.FullLoader)
 
             elif dataset.type == "db-schema":
                 if dataset.remove and not dataset.kwargs.get("rerun"):

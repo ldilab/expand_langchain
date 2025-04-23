@@ -45,6 +45,9 @@ def retriever_chain(
             elif isinstance(input, List):
                 results = retriever.batch(input)
                 result[key].append(results)
+            elif isinstance(input, dict):
+                results = retriever.invoke(input)
+                result[key].append(results)
             else:
                 raise ValueError("Invalid input type")
 
