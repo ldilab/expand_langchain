@@ -235,11 +235,12 @@ def _load_dict(
 
     if query is not None:
         from tinydb import TinyDB, where
+        from datetime import datetime
         from tinydb.storages import MemoryStorage
 
         db = TinyDB(storage=MemoryStorage)
         db.insert_multiple(list(result.values()))
-        result = db.search(eval(query, {"where": where}))
+        result = db.search(eval(query, {"where": where, "datetime": datetime}))
         result = {r[primary_key]: r for r in result}
 
     if cache_dir is not None:
