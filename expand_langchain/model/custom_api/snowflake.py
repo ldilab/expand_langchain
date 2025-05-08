@@ -35,6 +35,8 @@ class ChatSnowflakeCortexError(Exception):
 def _convert_obj_to_sql_string(obj: Any) -> str:
     if isinstance(obj, str):
         s = obj.replace("'", "''")
+        # s = obj.replace("'", '"')
+        s = s.replace("\\''", "''")
         return f"'{s}'"
     elif isinstance(obj, dict):
         s = "{"
@@ -251,7 +253,7 @@ class ChatSnowflakeCortex(BaseChatModel):
                 retries += 1
                 if retries >= self.max_retries:
                     raise ChatSnowflakeCortexError(
-                        f"Error while making request to Snowflake Cortex via Snowpark after {self.max_retries} retries: {e}"
+                        f"Error while making request to Snowflake Cortex via Snowpark after {self.max_retries} retries: {e}\n\nmessage_dicts: {message_dicts}\n\n{sql_stmt}"
                     )
 
         response = json.loads(l_rows[0]["LLM_RESPONSE"])

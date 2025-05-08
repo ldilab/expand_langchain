@@ -1,0 +1,13 @@
+fire
+langchain-core
+ruamel.yaml
+pyyaml-include
+langchain-elasticsearch
+autoregistry
+langgraph 
+langsmith 
+langchain_anthropic
+langfuse
+langchain-community
+langchain-openai
+json5
