@@ -9,4 +9,5 @@ from expand_langchain.chain import (
     passthrough,
     retriever,
     select,
+    execute_w_venv
 )

@@ -6,7 +6,7 @@ from langchain_core.runnables import RunnableLambda
 
 
 @parser_registry(name="code_block")
-def code_block_runner(list_all: bool = False) -> RunnableLambda:
+def code_block_runner(list_all: bool = False, list_first: bool = True) -> RunnableLambda:
     def func_str(input: str):
         pattern = r"```[a-z]*\n(.*?)```"
         match = re.search(pattern, input, re.DOTALL)
@@ -17,6 +17,8 @@ def code_block_runner(list_all: bool = False) -> RunnableLambda:
             if matches:
                 if list_all:
                     return matches
+                elif list_first:
+                    return matches[0]
                 else:
                     return matches[-1]
             else:
@@ -33,6 +35,8 @@ def code_block_runner(list_all: bool = False) -> RunnableLambda:
                 if matches:
                     if list_all:
                         return matches
+                    elif list_first:
+                        return matches[0]
                     else:
                         return matches[-1]
                 else:
