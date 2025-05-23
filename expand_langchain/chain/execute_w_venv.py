@@ -14,7 +14,7 @@ def get_python_executable(base_path, venv_name):
     venv_name: str, name of the virtual environment.
     return: str, path to the Python executable in the virtual environment.
     """
-    venv_path = os.path.join(base_path, "gcham_venv" + venv_name)
+    venv_path = base_path + venv_name
     bin_path = os.path.join(venv_path, "bin")
     python_executable = os.path.join(bin_path, "python")
     return python_executable
