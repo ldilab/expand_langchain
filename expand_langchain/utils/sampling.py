@@ -7,6 +7,7 @@ def sampling_chain(
     chain: Runnable,
     n: int = 1,
     flatten: bool = False,
+    enclose: bool = False,
     **kwargs,
 ):
     def divide_dict(d: dict) -> List[dict]:
@@ -68,7 +69,7 @@ def sampling_chain(
                     response = response[0]
 
         if isinstance(response, list) and isinstance(response[0], dict):
-            result = merge_dicts(response, flatten=flatten)
+            result = merge_dicts(response, flatten=flatten, enclose=enclose)
 
             return result
         else:
@@ -80,7 +81,11 @@ def sampling_chain(
     return result
 
 
-def merge_dicts(dicts: List[dict], flatten=False) -> dict:
+def merge_dicts(
+    dicts: List[dict],
+    flatten=False,
+    enclose=False,
+) -> dict:
     result = {}
     for d in dicts:
         for k, v in d.items():
@@ -91,5 +96,9 @@ def merge_dicts(dicts: List[dict], flatten=False) -> dict:
     if flatten:
         for k in result.keys():
             result[k] = [item for sublist in result[k] for item in sublist]
+
+    if enclose:
+        for k in result.keys():
+            result[k] = [result[k]]
 
     return result
