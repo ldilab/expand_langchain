@@ -52,6 +52,7 @@ def remove_cache(path, key):
     elif (path / key).exists():
         for p in (path / key).iterdir():
             remove_cache(path / key, p.stem)
+            remove_cache(path / key, p.name)
         (path / key).rmdir()
 
 
