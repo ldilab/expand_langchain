@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks.manager import CallbackManagerForLLMRun
@@ -249,11 +250,18 @@ class ChatSnowflakeCortex(BaseChatModel):
                 l_rows = self.sp_session.sql(sql_stmt).collect()
                 break
             except Exception as e:
-                retries += 1
-                if retries >= self.max_retries:
-                    raise ChatSnowflakeCortexError(
-                        f"Error while making request to Snowflake Cortex via Snowpark after {self.max_retries} retries: {e}"
+                if "max tokens" in str(e):
+                    logging.error(f"max tokens exceeded")
+                    raise e
+                else:
+                    retries += 1
+                    logging.error(
+                        f"Error while making request to Snowflake Cortex via Snowpark: {e}. Retrying {retries}/{self.max_retries}..."
                     )
+                    if retries >= self.max_retries:
+                        raise ChatSnowflakeCortexError(
+                            f"Error while making request to Snowflake Cortex via Snowpark after {self.max_retries} retries: {e}"
+                        )
 
         response = json.loads(l_rows[0]["LLM_RESPONSE"])
         ai_message_content = response["choices"][0]["messages"]

@@ -18,8 +18,8 @@ class GeneralChatModel(BaseChatModel):
     temperature: float
     top_p: float
     num_ctx: Optional[int] = None
-    max_retries: int = 1000000
-    platform: str = "azure"
+    max_retries: int = 10
+    platform: str
     stop: Optional[List[str]] = None
     base_url: Optional[str] = None
 
@@ -126,6 +126,9 @@ class GeneralChatModel(BaseChatModel):
         except ValueError as e:
             if "content filter" in str(e):
                 logging.error(f"content filter triggered")
+                raise e
+            elif "max tokens" in str(e):
+                logging.error(f"max tokens exceeded")
                 raise e
             elif "out of memory" in str(e):
                 logging.error(f"out of memory")

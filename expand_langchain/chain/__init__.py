@@ -6,6 +6,7 @@ from expand_langchain.chain import (
     execute,
     get_ith,
     llm,
+    mcp,
     passthrough,
     retriever,
     select,

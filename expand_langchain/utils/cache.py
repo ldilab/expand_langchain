@@ -4,7 +4,6 @@ from datetime import date
 from pathlib import Path
 
 from langchain_core.documents import Document
-from langchain_elasticsearch import ElasticsearchStore
 
 
 def load_cache(path, key):
@@ -17,6 +16,11 @@ def load_cache(path, key):
     elif (path / f"{key}.json").exists():
         with open(path / f"{key}.json", "r") as f:
             return json.load(f)
+    elif (path / f"{key}.pkl").exists():
+        with open(path / f"{key}.pkl", "rb") as f:
+            import pickle
+
+            return pickle.load(f)
     elif (path / key).exists():
         # if path / key has integer keys, it is a list
         if all([p.stem.isdigit() for p in (path / key).iterdir()]):
@@ -43,6 +47,8 @@ def remove_cache(path, key):
         (path / f"{key}.txt").unlink()
     elif (path / f"{key}.json").exists():
         (path / f"{key}.json").unlink()
+    elif (path / f"{key}.pkl").exists():
+        (path / f"{key}.pkl").unlink()
     elif (path / key).exists():
         for p in (path / key).iterdir():
             remove_cache(path / key, p.stem)
@@ -70,17 +76,15 @@ def save_cache(path, key, data):
         path = path / f"{key}.txt"
         with open(path, "w") as f:
             f.write(data.to_json())
-    elif isinstance(data, ElasticsearchStore):
-        logging.info("ElasticsearchStore is not saved.")
-        pass
     elif isinstance(data, date):
         path = path / f"{key}.txt"
         with open(path, "w") as f:
             f.write(data.isoformat())
     else:
-        try:
-            path = path / f"{key}.json"
-            with open(path, "w") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-            logging.error(f"Error in saving files: {e}")
+        path = path / f"{key}.pkl"
+        with open(path, "wb") as f:
+            import pickle
+
+            pickle.dump(data, f)
+
+    logging.info(f"Saved cache to {path}, key: {key}")

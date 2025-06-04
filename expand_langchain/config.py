@@ -20,14 +20,14 @@ class DatasetConfig(BaseModel):
 
 
 class EdgeConfig(BaseModel):
-    pair: Tuple[str, str]
-    type: str
+    pair: List[str]
+    route: str
     kwargs: Optional[dict] = None
 
 
 class ChainConfig(BaseModel):
     name: str
-    dependencies: List[str]
+    dependencies: List[str] = []
     key_map: Dict[str, str] = {}
     type: str
     input_keys: List[str] = []
@@ -48,6 +48,7 @@ class GraphConfig(BaseModel):
     entry_point: str
     edges: List[EdgeConfig]
     nodes: List[NodeConfig]
+    routes: Optional[Dict[str, str]] = None
 
 
 class Config(BaseModel):

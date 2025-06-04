@@ -61,6 +61,7 @@ class Generator(BaseModel):
     langfuse_on: bool = False
     rerun: bool = False
     max_concurrency: int = 5
+    recursion_limit: int = 25
 
     run_name: str = None  # if None, config_path.stem is used
     config_path: Path = None
@@ -202,6 +203,7 @@ class Generator(BaseModel):
 
         async with sem:
             config = {
+                "recursion_limit": self.recursion_limit,
                 "callbacks": [],
                 "tags": [id],
                 "metadata": {
@@ -217,17 +219,23 @@ class Generator(BaseModel):
                 langfuse_handler = CallbackHandler()
                 config["callbacks"].append(langfuse_handler)
 
+            result = [target]
             try:
-                result = await self.graph.ainvoke(
+                async for cur_result in self.graph.astream(
                     [target],
                     config=config,
-                )
+                ):
+                    _result = result[-1]
+                    for v in cur_result.values():
+                        _result.update(v[-1])
+                    result.append(_result)
+
                 logging.info(f"Done: {id}")
 
             except Exception as e:
                 logging.error(f"Error in running {id}")
                 logging.error(format_exc())
-                result = [{"error": format_exc()}]
+                result.append({**result[-1], "error": format_exc()})
 
                 if self.debug:
                     raise e
@@ -279,28 +287,21 @@ class Generator(BaseModel):
         data = dict(sorted(data.items(), key=lambda x: x[0]))
         data = list(data.values())
 
-        # max length of the result
-        max_len = max([len(d) for d in data])
-
         dump_data = [{} for _ in range(len(data))]
-        for i in range(max_len):
-            for j, d in enumerate(data):
-                if isinstance(d, list):
-                    if i < len(d):
-                        dump_data[j].update(d[i])
-                    else:
-                        dump_data[j].update({"max_depth": len(d)})
-                elif isinstance(d, dict):
-                    dump_data[j] = d
-                else:
-                    raise ValueError("Invalid data type")
+        for j, d in enumerate(data):
+            if isinstance(d, list):
+                dump_data[j].update(d[-1])
+            elif isinstance(d, dict):
+                dump_data[j] = d
+            else:
+                raise ValueError("Invalid data type")
 
-            filename = f"{self.output_dir}/results_merged_{i}.json"
-            with open(filename, "w") as f:
-                json.dump(dump_data, f, indent=4, ensure_ascii=False)
+        filename = f"{self.output_dir}/results_merged.json"
+        with open(filename, "w") as f:
+            json.dump(dump_data, f, indent=4, ensure_ascii=False)
 
-            filename = f"{self.output_dir}/results_merged_{i}.yaml"
-            pretty_yaml_dump(dump_data, filename)
+        filename = f"{self.output_dir}/results_merged.yaml"
+        pretty_yaml_dump(dump_data, filename)
 
         return self
 
