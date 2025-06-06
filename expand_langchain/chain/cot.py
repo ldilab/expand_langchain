@@ -5,6 +5,7 @@ from expand_langchain.chain.llm import llm_chain
 from expand_langchain.utils.parser import parser_chain
 from expand_langchain.utils.registry import chain_registry
 from expand_langchain.utils.sampling import sampling_chain
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
 from langfuse.decorators import langfuse_context, observe
 
@@ -26,7 +27,9 @@ def cot_chain(
 
         parsed_result = parser.invoke(result, config=config)
 
+        input_prompt = chain.get_prompts()[0].format(**data)
         return {
+            f"{key}_input": input_prompt,
             f"{key}_raw": result,
             key: parsed_result,
         }
