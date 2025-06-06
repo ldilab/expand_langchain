@@ -1,15 +1,14 @@
 import asyncio
+import importlib.util
 import logging
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, List, Optional, Type
 
 import networkx as nx
 from expand_langchain.config import ChainConfig, GraphConfig, NodeConfig
 from expand_langchain.utils.cache import load_cache, save_cache
-from expand_langchain.utils.registry import chain_registry, transition_registry
+from expand_langchain.utils.registry import chain_registry
 from langchain_core.runnables import Runnable
 from langgraph.graph import StateGraph
-from pydantic import BaseModel
 
 
 class NodeChain(Runnable):
@@ -266,8 +265,20 @@ class CustomLangGraph(StateGraph):
         edges = self.config.edges
         for edge in edges:
             pair = edge.pair
-            if edge.type == "always":
+            if edge.route == "always":
                 self.add_edge(pair[0], pair[1])
             else:
-                func = transition_registry.get(edge.type)(dest=pair[1], **edge.kwargs)
+                path = self.config.routes[edge.route]
+                func = get_custom_func(path, "route_func")
                 self.add_conditional_edges(pair[0], func)
+
+
+def get_custom_func(path, name):
+    """
+    Get a custom function from a file path.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    func = getattr(module, name)
+    return func

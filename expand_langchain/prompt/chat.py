@@ -1,12 +1,12 @@
 from typing import Dict, List, Tuple
 
+from expand_langchain.utils.registry import prompt_registry
 from langchain.prompts import AIMessagePromptTemplate as AIMPT
 from langchain.prompts import ChatPromptTemplate
 from langchain.prompts import HumanMessagePromptTemplate as HMPT
 from langchain.prompts import SystemMessagePromptTemplate as SMPT
 from langchain.prompts.few_shot import FewShotChatMessagePromptTemplate
-
-from expand_langchain.utils.registry import prompt_registry
+from langchain_core.prompts import MessagesPlaceholder
 
 
 @prompt_registry(name="chat")
@@ -14,13 +14,21 @@ def chat_prompt(
     examples: list,
     body_template_paths: List[str],
     system_template_paths: List[str] = [],
+    **kwargs,
 ):
     system = system_prompt(system_template_paths)
     body = body_prompt(body_template_paths)
     example = example_prompt(examples, body) if examples else None
     target = target_prompt(body)
 
-    result = system + example + target if example else system + target
+    result = system
+    if example:
+        result = result + example
+    result = result + ChatPromptTemplate.from_messages(
+        [MessagesPlaceholder(variable_name="chat_history")]
+    )
+
+    result = result + target
 
     return result
 
