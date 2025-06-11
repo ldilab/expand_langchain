@@ -6,30 +6,25 @@ from expand_langchain.chain.llm import llm_chain
 from expand_langchain.utils.parser import parser_chain
 from expand_langchain.utils.registry import chain_registry
 from expand_langchain.utils.sampling import sampling_chain
-from langchain.memory import ConversationBufferMemory
 from langchain_core.messages import AIMessage
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnableLambda, RunnablePassthrough
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda
-from langfuse.decorators import langfuse_context, observe
 
 
 @chain_registry(name="cot")
 def cot_chain(
-    key: str,
-    examples: Optional[dict] = None,
-    n: int = 1,
-    chat_history_len: int = 0,
-    chat_history_key: str = "chat_history",
-    **kwargs,
+        key: str,
+        examples: Optional[dict] = None,
+        n: int = 1,
+        chat_history_len: int = 0,
+        chat_history_key: str = "chat_history",
+        **kwargs,
 ):
-
     async def _func(data, config={}):
         chain = llm_chain(
             examples=list(examples.values()),
             **kwargs,
         )
+        input_prompt = chain.get_prompts()[0][-1].format(**data)
 
         if chat_history_len > 0:
             chat_history = data.get(chat_history_key)
@@ -46,6 +41,7 @@ def cot_chain(
             parsed_result = parser.invoke(response, config=config)
 
             return {
+                f"{key}_input": input_prompt,
                 f"{key}_raw": response,
                 key: parsed_result,
                 "chat_history": [chat_history],
@@ -56,16 +52,15 @@ def cot_chain(
             parser = parser_chain(**kwargs)
             parsed_result = parser.invoke(response, config=config)
 
-        input_prompt = chain.get_prompts()[0].format(**data)
         return {
             f"{key}_input": input_prompt,
-            f"{key}_raw": result,
+            f"{key}_raw": response,
             key: parsed_result,
         }
 
     chain = RunnableLambda(_func)
 
-    result = sampling_chain(chain, n, **kwargs)
-    result.name = key
+    outer_result = sampling_chain(chain, n, **kwargs)
+    outer_result.name = key
 
-    return result
+    return outer_result
