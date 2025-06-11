@@ -24,7 +24,7 @@ def chat_prompt(
     result = system
     if example:
         result = result + example
-    if kwargs.get("chat_history", True):
+    if kwargs.get("chat_history", False):
         result = result + ChatPromptTemplate.from_messages(
             [MessagesPlaceholder(variable_name="chat_history")]
         )
