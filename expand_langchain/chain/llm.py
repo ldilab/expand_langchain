@@ -7,6 +7,7 @@ from expand_langchain.utils.registry import (
 )
 from langchain_core.output_parsers import StrOutputParser
 
+from pydantic import BaseModel, Field, create_model
 
 @chain_registry(name="llm")
 def llm_chain(
@@ -26,6 +27,30 @@ def llm_chain(
 
     model = model_registry[prompt_type](**llm)
 
+    # if "structured_output" in kwargs:
+    #     structured_output = kwargs["structured_output"]
+    #     raw_fields = structured_output["fields"]
+    #     print(raw_fields)
+    #     fields = {
+    #         name: (
+    #             kvs["type"],
+    #             Field(description=kvs["description"])
+    #         )
+    #         for field in raw_fields
+    #         for name, kvs in field.items()
+    #     }
+    #
+    #     structured_output_class_obj = create_model(
+    #         "ResponseFormatter",      # name of the generated class
+    #         __base__=BaseModel,       # inherit from BaseModel
+    #         **fields                  # unpack your field definitions
+    #     )
+    #     model = model.with_structured_output(
+    #         structured_output_class_obj,
+    #     )
+    #     result = prompt | model
+    #
+    # else:
     result = prompt | model | StrOutputParser()
     result.name = "llm_chain"
 
