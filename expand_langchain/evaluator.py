@@ -150,3 +150,33 @@ def pass_at_k(
         return naive_pass_at_k(gt_results, k)
     else:
         return pass_at_k_with_scores(gt_results, k, scores)
+
+
+def vanilla_results(path, key):
+    sc_kwargs = {"n_methods": 1}
+    transpose = True
+    methods = [no_voting, self_consistency]
+    cutoffs = ["2023-05-01", "2024-01-01"]
+
+    for method in methods:
+        for cutoff in cutoffs:
+            Evaluator(
+                path=path,
+                output_key=key,
+                method=method,
+                cutoff=cutoff,
+                rerun=True,
+                sc_kwargs=sc_kwargs,
+                transpose=transpose,
+            ).run()
+
+
+if __name__ == "__main__":
+    # Example usage
+    evaluator = Evaluator(
+        path=Path("/workspace/Chain-of-Functions/chain_of_functions/results/20250704/final-code-generation-wo_retrieval/code/results_merged.json"),
+        gt_key="code",
+    )
+
+    results = evaluator.run(k=[1], n=-1)
+    print(results)
