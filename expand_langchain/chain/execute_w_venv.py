@@ -26,6 +26,7 @@ def execute_offline_chain(
     env_id_key: str,
     base_path: Optional[str] = None,
     why_bad = False,
+    timeout: float = 10.0,
     **kwargs,
 ):
     
@@ -59,7 +60,7 @@ def execute_offline_chain(
                     [py_exec, "-c", _c],
                     text=True,
                     capture_output=True,
-                    timeout=60
+                    timeout=timeout
                 )
                 #TODO: check with testcase. this version: only check syntax error
                 if why_bad:
