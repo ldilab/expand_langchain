@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import yaml
 import yaml_include
@@ -10,6 +10,19 @@ class SourceConfig(BaseModel):
     name: str
     type: str
     kwargs: Optional[dict] = None
+
+
+class TransformConfig(BaseModel):
+    type: str
+    kwargs: Optional[dict] = None
+
+
+class FieldConfig(BaseModel):
+    name: str
+    source: Optional[str] = None
+    key: Optional[str] = None
+    value: Optional[Any] = None
+    transform: Optional[TransformConfig] = None
 
 
 class DatasetConfig(BaseModel):
