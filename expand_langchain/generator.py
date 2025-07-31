@@ -6,6 +6,7 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Any, List, Optional
 
+import wandb
 import yaml
 from expand_langchain.config import Config
 from expand_langchain.graph import CustomLangGraph
@@ -15,8 +16,6 @@ from pydantic import BaseModel
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import PlainScalarString
 from tqdm.asyncio import tqdm_asyncio
-
-import wandb
 
 """registry """
 from expand_langchain.utils import registry  # isort:skip
@@ -83,8 +82,15 @@ class Generator(BaseModel):
     def __init__(self, **data):
         super().__init__(**data)
 
-        if self.verbose:
+        if self.debug:
+            logging.basicConfig(level=logging.DEBUG)
+        elif self.verbose:
             logging.basicConfig(level=logging.INFO)
+
+        logging.getLogger("snowflake").setLevel(logging.WARNING)
+        logging.getLogger("httpcore").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
+        logging.getLogger("urllib3").setLevel(logging.WARNING)
 
         self._load_config()
         self._init_result_dir()
@@ -254,6 +260,17 @@ class Generator(BaseModel):
 
         class CustomEncoder(json.JSONEncoder):
             def default(self, obj):
+                from langchain_core.messages.base import BaseMessage
+
+                if isinstance(obj, BaseMessage):
+                    return {
+                        "type": obj.type,
+                        "content": obj.content,
+                        "additional_kwargs": obj.additional_kwargs,
+                        "response_metadata": obj.response_metadata,
+                        "name": obj.name,
+                        "id": obj.id,
+                    }
                 try:
                     return super().default(obj)
                 except TypeError:

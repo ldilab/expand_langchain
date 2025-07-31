@@ -115,6 +115,11 @@ class GeneralChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForChainRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        # Debug: Log the input messages before sending to LLM
+        logging.debug(f"Input messages to LLM:")
+        for i, msg in enumerate(messages):
+            logging.debug(f"  Message {i}: {type(msg).__name__} - {repr(msg.content[:200])}")
+        
         try:
             result = self.llm._generate(
                 messages=messages,
