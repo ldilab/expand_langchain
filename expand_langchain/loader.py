@@ -221,7 +221,33 @@ def _load_dict(
                 result[id][field.get("name")] = field.get("value")
             else:
                 source = sources[field.get("source")]
-                result[id][field.get("name")] = source[i][field.get("key")]
+                value = source[i][field.get("key")]
+
+                # Apply transform if it exists
+                if "transform" in field:
+                    transform_config = field["transform"]
+                    if transform_config.get("type") == "custom_lambda":
+                        transform_kwargs = transform_config.get("kwargs", {})
+                        src_keys = transform_kwargs.get("src", [])
+                        func_code = transform_kwargs.get("func", "")
+
+                        # Get source values for the function
+                        src_values = []
+                        for src_key in src_keys:
+                            src_values.append(source[i][src_key])
+
+                        # Execute the transform function
+                        try:
+                            local_namespace = {}
+                            exec(func_code, globals(), local_namespace)
+                            func_obj = local_namespace["func"]
+                            value = func_obj(*src_values)
+                        except Exception as e:
+                            logger.error(f"Error executing transform function: {e}")
+                            # Fall back to original value if transform fails
+                            pass
+
+                result[id][field.get("name")] = value
 
     if custom_lambda is not None:
         try:
@@ -234,8 +260,9 @@ def _load_dict(
         result = {k: func_obj(v) for k, v in result.items()}
 
     if query is not None:
-        from tinydb import TinyDB, where
         from datetime import datetime
+
+        from tinydb import TinyDB, where
         from tinydb.storages import MemoryStorage
 
         db = TinyDB(storage=MemoryStorage)
