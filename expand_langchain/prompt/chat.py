@@ -14,6 +14,8 @@ def chat_prompt(
     examples: list,
     body_template_paths: List[str],
     system_template_paths: List[str] = [],
+    chat_history_len: int = 0,
+    chat_history_key: str = "chat_history",
     **kwargs,
 ):
     system = system_prompt(system_template_paths)
@@ -24,9 +26,10 @@ def chat_prompt(
     result = system
     if example:
         result = result + example
-    result = result + ChatPromptTemplate.from_messages(
-        [MessagesPlaceholder(variable_name="chat_history")]
-    )
+    if chat_history_len > 0:
+        result = result + ChatPromptTemplate.from_messages(
+            [MessagesPlaceholder(variable_name=chat_history_key)]
+        )
 
     result = result + target
 

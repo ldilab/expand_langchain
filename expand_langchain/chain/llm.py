@@ -14,6 +14,8 @@ def llm_chain(
     examples: Optional[List[Dict[str, str]]] = None,
     llm: Dict[str, Any] = {},
     disable_icl: bool = False,
+    chat_history_len: int = 0,
+    chat_history_key: str = "chat_history",
     **kwargs,
 ):
     prompt_type = prompt["type"]
@@ -21,6 +23,8 @@ def llm_chain(
 
     prompt = prompt_registry[prompt_type](
         examples=examples if not disable_icl else None,
+        chat_history_len=chat_history_len,
+        chat_history_key=chat_history_key,
         **prompt_kwargs,
     )
 

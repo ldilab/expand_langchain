@@ -26,18 +26,20 @@ def cot_chain(
     async def _func(data, config={}):
         chain = llm_chain(
             examples=list(examples.values()),
+            chat_history_len=chat_history_len,
+            chat_history_key=chat_history_key,
             **kwargs,
         )
 
         if chat_history_len > 0:
             chat_history = data.get(chat_history_key)
             chat_history = [] if not chat_history else chat_history[0]
-            data["chat_history"] = chat_history
+            data[chat_history_key] = chat_history
             if len(chat_history) > chat_history_len:
-                data["chat_history"] = chat_history[-chat_history_len:]
+                data[chat_history_key] = chat_history[-chat_history_len:]
             response = await chain.ainvoke(data, config=config)
 
-            chat_history.append(chain.steps[0].messages[2].format(**data))
+            chat_history.append(chain.steps[0].messages[-1].format(**data))
             chat_history.append(AIMessage(response))
 
             parser = parser_chain(**kwargs)
@@ -46,7 +48,7 @@ def cot_chain(
             return {
                 f"{key}_raw": response,
                 key: parsed_result,
-                "chat_history": [chat_history],
+                chat_history_key: [chat_history],
             }
         else:
             response = await chain.ainvoke(data, config=config)
