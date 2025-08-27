@@ -11,6 +11,7 @@ import yaml
 from expand_langchain.config import Config
 from expand_langchain.graph import CustomLangGraph
 from expand_langchain.loader import Loader
+from expand_langchain.utils import misc
 from langchain_core.documents import Document
 from pydantic import BaseModel
 from ruamel.yaml import YAML
@@ -24,26 +25,6 @@ from expand_langchain.model import *
 from expand_langchain.parser import *
 from expand_langchain.prompt import *
 from expand_langchain.transition import *
-
-
-def pretty_yaml_dump(data, path):
-    def _long_string_representer(dumper, data):
-        data = data.replace("\r", "")
-        data = PlainScalarString(data)
-
-        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
-
-    def _default_representer(dumper, data):
-        data = str(data)
-        return _long_string_representer(dumper, data)
-
-    yaml = YAML()
-    yaml.default_flow_style = False
-    yaml.representer.add_representer(object, _default_representer)
-    yaml.representer.add_representer(str, _long_string_representer)
-
-    with open(path, "w") as f:
-        yaml.dump(data, f)
 
 
 class Generator(BaseModel):
@@ -287,7 +268,7 @@ class Generator(BaseModel):
         if not path.parent.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
 
-        pretty_yaml_dump(result, path)
+        misc.pretty_yaml_dump(result, path)
 
     def merge_json(self):
         """
@@ -318,7 +299,7 @@ class Generator(BaseModel):
             json.dump(dump_data, f, indent=4, ensure_ascii=False)
 
         filename = f"{self.output_dir}/results_merged.yaml"
-        pretty_yaml_dump(dump_data, filename)
+        misc.pretty_yaml_dump(dump_data, filename)
 
         return self
 
