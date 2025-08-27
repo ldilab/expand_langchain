@@ -28,27 +28,29 @@ from expand_langchain.transition import *
 
 
 class Generator(BaseModel):
+    run_name: str = None  # if None, config_path.stem is used
+    config_path: Path = None
+    cache_root: Optional[Path] = None
+
+    save_on: bool = True
+    rerun: bool = False
+    max_concurrency: int = 5
+    recursion_limit: int = 25
+
     verbose: bool = False
     debug: bool = False
-    save_on: bool = True
+
     user_input_mode: bool = False
 
     api_keys_path: str = "api_keys.json"
 
     target_dataset_name: str = "target"
-    example_dataset_name: str = "example"
+
     wandb_on: bool = False
     langfuse_on: bool = False
-    rerun: bool = False
-    max_concurrency: int = 5
-    recursion_limit: int = 25
-
-    run_name: str = None  # if None, config_path.stem is used
-    config_path: Path = None
-    config: Config = None
-    cache_root: Optional[Path] = None
 
     # private variables
+    config: Config = None
     output_dir: Path = None
     result_root: Path = None
     datasets: dict = {}
@@ -78,7 +80,6 @@ class Generator(BaseModel):
         self._load_api_keys()
         self._load_datasets()
         self._init_wandb()
-        self._compile_graph()
 
     def _load_config(self):
         if self.config_path is not None:
@@ -136,11 +137,9 @@ class Generator(BaseModel):
 
         wandb.config.update(self.config.model_dump())
 
-    def _compile_graph(self):
+    def compile_graph(self):
         self.graph = CustomLangGraph(
             config=self.config.graph,
-            examples=self.example_dataset,
-            etc_datasets=self.datasets,
         ).compile()
 
     def run(
@@ -150,6 +149,8 @@ class Generator(BaseModel):
         start: Optional[int] = None,
         end: Optional[int] = None,
     ):
+        self.compile_graph()
+
         targets = self.target_dataset
 
         if n is not None:
