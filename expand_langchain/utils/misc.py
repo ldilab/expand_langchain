@@ -1,3 +1,7 @@
+from ruamel.yaml import YAML
+from ruamel.yaml.scalarstring import PlainScalarString
+
+
 def pretty_yaml_dump(data, path):
     def _long_string_representer(dumper, data):
         data = data.replace("\r", "")

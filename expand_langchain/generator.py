@@ -4,19 +4,16 @@ import logging
 import os
 from pathlib import Path
 from traceback import format_exc
-from typing import Any, List, Optional
+from typing import List, Optional
 
 import wandb
-import yaml
+from pydantic import BaseModel
+from tqdm.asyncio import tqdm_asyncio
+
 from expand_langchain.config import Config
 from expand_langchain.graph import CustomLangGraph
 from expand_langchain.loader import Loader
 from expand_langchain.utils import misc
-from langchain_core.documents import Document
-from pydantic import BaseModel
-from ruamel.yaml import YAML
-from ruamel.yaml.scalarstring import PlainScalarString
-from tqdm.asyncio import tqdm_asyncio
 
 """registry """
 from expand_langchain.utils import registry  # isort:skip
