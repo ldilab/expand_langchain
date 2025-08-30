@@ -2,16 +2,15 @@ import logging
 import os
 from typing import Any, List, Optional
 
-from expand_langchain.model.custom_api.snowflake import ChatSnowflakeCortex
-from expand_langchain.utils.registry import model_registry
 from langchain.callbacks.manager import CallbackManagerForChainRun
 from langchain.schema import BaseMessage, ChatResult
 from langchain_community.chat_models import ChatOllama
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
 
+from .custom_api.snowflake import ChatSnowflakeCortex
 
-@model_registry(name="chat")
+
 class GeneralChatModel(BaseChatModel):
     model: Optional[str] = None
     max_tokens: int
@@ -118,8 +117,10 @@ class GeneralChatModel(BaseChatModel):
         # Debug: Log the input messages before sending to LLM
         logging.debug(f"Input messages to LLM:")
         for i, msg in enumerate(messages):
-            logging.debug(f"  Message {i}: {type(msg).__name__} - {repr(msg.content[:200])}")
-        
+            logging.debug(
+                f"  Message {i}: {type(msg).__name__} - {repr(msg.content[:200])}"
+            )
+
         try:
             result = self.llm._generate(
                 messages=messages,

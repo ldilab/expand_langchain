@@ -1,6 +1,5 @@
 from typing import Dict, List, Tuple
 
-from expand_langchain.utils.registry import prompt_registry
 from langchain.prompts import AIMessagePromptTemplate as AIMPT
 from langchain.prompts import ChatPromptTemplate
 from langchain.prompts import HumanMessagePromptTemplate as HMPT
@@ -9,13 +8,13 @@ from langchain.prompts.few_shot import FewShotChatMessagePromptTemplate
 from langchain_core.prompts import MessagesPlaceholder
 
 
-@prompt_registry(name="chat")
 def chat_prompt(
-    examples: list,
     body_template_paths: List[str],
+    examples: list = [],
     system_template_paths: List[str] = [],
     chat_history_len: int = 0,
     chat_history_key: str = "chat_history",
+    partial_variables: dict = {},
     **kwargs,
 ):
     system = system_prompt(system_template_paths)
@@ -32,6 +31,7 @@ def chat_prompt(
         )
 
     result = result + target
+    result = result.partial(**partial_variables)
 
     return result
 

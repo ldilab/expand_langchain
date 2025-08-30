@@ -1,36 +1,35 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from expand_langchain.utils.registry import (
-    chain_registry,
-    model_registry,
-    prompt_registry,
-)
+from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import Runnable, RunnableSerializable
+from pydantic import Field, PrivateAttr
+
+from .model.chat import GeneralChatModel
+from .prompt.chat import chat_prompt
 
 
-@chain_registry(name="llm")
-def llm_chain(
-    prompt: dict,
-    examples: Optional[List[Dict[str, str]]] = None,
-    llm: Dict[str, Any] = {},
-    disable_icl: bool = False,
-    chat_history_len: int = 0,
-    chat_history_key: str = "chat_history",
-    **kwargs,
-):
-    prompt_type = prompt["type"]
-    prompt_kwargs = prompt["kwargs"]
+class LLMChain(RunnableSerializable):
+    _prompt: ChatPromptTemplate = PrivateAttr()
+    _model: GeneralChatModel = PrivateAttr()
+    _chain: Runnable = PrivateAttr()
 
-    prompt = prompt_registry[prompt_type](
-        examples=examples if not disable_icl else None,
-        chat_history_len=chat_history_len,
-        chat_history_key=chat_history_key,
-        **prompt_kwargs,
-    )
+    # pydantic
+    model_config = {"arbitrary_types_allowed": True}
 
-    model = model_registry[prompt_type](**llm)
+    def __init__(
+        self,
+        prompt_kwargs: Dict[str, Any],
+        llm_kwargs: Dict[str, Any],
+        **data,
+    ):
+        super().__init__(**data)
 
-    result = prompt | model | StrOutputParser()
-    result.name = "llm_chain"
+        self._prompt = chat_prompt(**prompt_kwargs)
+        self._model = GeneralChatModel(**llm_kwargs)
+        self.name = "llm_chain"
 
-    return result
+        self._chain = self._prompt | self._model | StrOutputParser()
+
+    def invoke(self, input, config=None, **kwargs):
+        return self._chain.invoke(input, config, **kwargs)

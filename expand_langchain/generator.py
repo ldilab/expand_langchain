@@ -4,56 +4,41 @@ import logging
 import os
 from pathlib import Path
 from traceback import format_exc
-from typing import List, Optional
+from typing import Optional
 
-import wandb
+from datasets import Dataset
+from langgraph.graph import StateGraph
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
 
-from expand_langchain.config import Config
-from expand_langchain.graph import CustomLangGraph
-from expand_langchain.loader import Loader
-from expand_langchain.utils import misc
-
-"""registry """
-from expand_langchain.utils import registry  # isort:skip
-from expand_langchain.chain import *
-from expand_langchain.model import *
-from expand_langchain.parser import *
-from expand_langchain.prompt import *
-from expand_langchain.transition import *
+from .graph import RootCustomStateGraph
+from .utils import misc
 
 
 class Generator(BaseModel):
+    root_node: StateGraph
+
     run_name: str = None  # if None, config_path.stem is used
-    config_path: Path = None
     cache_root: Optional[Path] = None
 
     save_on: bool = True
     rerun: bool = False
-    max_concurrency: int = 5
-    recursion_limit: int = 25
+    max_concurrency: int = 4
+    recursion_limit: int = 100
 
     verbose: bool = False
     debug: bool = False
 
-    user_input_mode: bool = False
-
     api_keys_path: str = "api_keys.json"
 
-    target_dataset_name: str = "target"
-
-    wandb_on: bool = False
     langfuse_on: bool = False
 
+    target_dataset: Dataset
+
     # private variables
-    config: Config = None
     output_dir: Path = None
     result_root: Path = None
-    datasets: dict = {}
-    target_dataset: dict = {}
-    example_dataset: dict = {}
-    graph: CustomLangGraph = None
+    graph: RootCustomStateGraph = None
 
     # pydantic config
     class Config:
@@ -72,23 +57,10 @@ class Generator(BaseModel):
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-        self._load_config()
         self._init_result_dir()
         self._load_api_keys()
-        self._load_datasets()
-        self._init_wandb()
-
-    def _load_config(self):
-        if self.config_path is not None:
-            self.config = Config(path=self.config_path)
-        elif self.config is None:
-            raise ValueError("Either config_path or config should be provided")
-        else:
-            pass
 
     def _init_result_dir(self):
-        if self.run_name is None:
-            self.run_name = self.config_path.stem
         if self.save_on:
             self.output_dir = Path(f"results/{self.run_name}")
             self.result_root = self.output_dir / "results"
@@ -104,40 +76,8 @@ class Generator(BaseModel):
                     logging.warning(f"Set {k} from api_keys file")
                     os.environ[k] = v
 
-    def _load_datasets(self):
-        loader = Loader(config=self.config)
-        self.datasets = loader.run().result
-
-        if not self.user_input_mode:
-            self.target_dataset = self.datasets.get(self.target_dataset_name, {})
-            del self.datasets[self.target_dataset_name]
-
-        self.example_dataset = self.datasets.get(self.example_dataset_name, {})
-        if self.example_dataset_name in self.datasets:
-            del self.datasets[self.example_dataset_name]
-
-    def _init_wandb(self):
-        wandb.require("core")
-
-        mode = "disabled"
-        if self.wandb_on:
-            logging.info("Wandb mode is online")
-            mode = "online"
-
-        wandb.init(
-            mode=mode,
-            entity=os.environ.get("WANDB_ENTITY", None),
-            project=os.environ.get("WANDB_PROJECT", None),
-            name=self.run_name,
-            notes=self.config.description,
-        )
-
-        wandb.config.update(self.config.model_dump())
-
     def compile_graph(self):
-        self.graph = CustomLangGraph(
-            config=self.config.graph,
-        ).compile()
+        self.graph = RootCustomStateGraph(self.root_node.compile()).compile()
 
     def run(
         self,
@@ -146,31 +86,56 @@ class Generator(BaseModel):
         start: Optional[int] = None,
         end: Optional[int] = None,
     ):
-        self.compile_graph()
-
-        targets = self.target_dataset
+        dataset = self.target_dataset
+        if self.graph is None:
+            self.compile_graph()
 
         if n is not None:
-            targets = {k: v for k, v in list(targets.items())[:n]}
+            dataset = dataset.select(range(min(n, len(dataset))))
         elif start is not None and end is not None:
-            targets = {k: v for k, v in list(targets.items())[start:end]}
+            dataset = dataset.select(range(start, min(end, len(dataset))))
         elif ids is not None:
-            targets = {k: v for k, v in targets.items() if k in ids}
+            # ids가 string 키 리스트인 경우, 해당 키를 가진 데이터만 선택
+            if len(ids) > 0 and isinstance(ids[0], str):
+                # Dataset에서 id 필드를 기준으로 필터링
+                # 일반적으로 Dataset에 'id' 컬럼이 있다고 가정
+                if "id" in dataset.column_names:
+                    indices = []
+                    for i in range(len(dataset)):
+                        if str(dataset[i]["id"]) in ids:
+                            indices.append(i)
+                    dataset = dataset.select(indices)
+                else:
+                    # id 컬럼이 없는 경우, 첫 번째 컬럼을 키로 사용하거나 인덱스를 문자열로 처리
+                    indices = []
+                    for i in range(len(dataset)):
+                        if str(i) in ids:
+                            indices.append(i)
+                    dataset = dataset.select(indices)
+            else:
+                # ids가 정수 인덱스 리스트인 경우
+                indices = [i for i in ids if isinstance(i, int) and i < len(dataset)]
+                dataset = dataset.select(indices)
         else:
             pass
 
-        asyncio.run(self._run(targets))
+        asyncio.run(self._run(dataset))
 
         return self
 
     async def _run(
         self,
-        targets: dict,
+        dataset: Dataset,
     ):
         tasks = []
         sem = asyncio.Semaphore(self.max_concurrency)
-        for id, target in targets.items():
-            task = self._run_one(id, target, sem)
+
+        # Dataset을 이터레이션하면서 인덱스와 데이터를 함께 가져옴
+        for i in range(len(dataset)):
+            target = dataset[i]
+            # target에 id 필드가 있으면 사용하고, 없으면 인덱스를 사용
+            data_id = target.get("id", i) if isinstance(target, dict) else i
+            task = self._run_one(data_id, target, sem)
             tasks.append(task)
 
         await tqdm_asyncio.gather(*tasks)
@@ -204,26 +169,21 @@ class Generator(BaseModel):
                 langfuse_handler = CallbackHandler()
                 config["callbacks"].append(langfuse_handler)
 
-            result = [target]
-            try:
-                async for cur_result in self.graph.astream(
-                    [target],
-                    config=config,
-                ):
-                    _result = result[-1]
-                    for v in cur_result.values():
-                        _result.update(v[-1])
-                    result.append(_result)
+            # try:
+            result = await self.graph.ainvoke(
+                target,
+                config=config,
+            )
 
-                logging.info(f"Done: {id}")
+            logging.info(f"Done: {id}")
 
-            except Exception as e:
-                logging.error(f"Error in running {id}")
-                logging.error(format_exc())
-                result.append({**result[-1], "error": format_exc()})
+            # except Exception as e:
+            #     logging.error(f"Error in running {id}")
+            #     logging.error(format_exc())
+            #     result = {"error": format_exc()}
 
-                if self.debug:
-                    raise e
+            #     if self.debug:
+            #         raise e
 
             self._save_json(id, result)
 
@@ -306,50 +266,3 @@ class Generator(BaseModel):
         Exit the generator
         """
         pass
-
-    async def astream_user_input(
-        self,
-        nl_query: str,
-        event_names: Optional[List[str]] = None,
-    ):
-        """
-        Run user input
-        """
-        target = {"prompt": nl_query}
-
-        gen = self.graph.astream_events(
-            [target],
-            version="v2",
-            include_names=event_names,
-        )
-        async for result in gen:
-            if result["event"] == "on_chain_end":
-                yield result["data"]["output"]
-
-    def run_user_input(
-        self,
-        inputs: List[dict],
-    ):
-        return self.graph.invoke(inputs)
-
-    def lark_message(
-        self,
-        msg: str = "Done",
-    ):
-        """
-        Send message to the webhook
-        """
-        webhook = os.environ.get("LARK_WEBHOOK", None)
-        if webhook is None:
-            return self
-
-        import requests
-
-        msg = f"{self.run_name}: {msg}"
-
-        requests.post(
-            webhook,
-            json={"msg_type": "text", "content": {"text": msg}},
-        )
-
-        return self
