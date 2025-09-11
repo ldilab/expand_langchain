@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import yaml
-from datasets import Dataset, concatenate_datasets, load_dataset
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PydanticField
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from tqdm import tqdm
+
+from datasets import Dataset, load_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ class SourceLoader(BaseModel):
 
 
 class HuggingFaceSourceLoader(SourceLoader):
-    dataset_name: str
     split: Optional[str] = None
     config_name: Optional[str] = None
     revision: Optional[str] = None
@@ -41,7 +41,7 @@ class HuggingFaceSourceLoader(SourceLoader):
         """Load dataset from Hugging Face Hub"""
         try:
             dataset = load_dataset(
-                self.dataset_name,
+                self.path,
                 name=self.config_name,
                 split=self.split,
                 revision=self.revision,
@@ -57,17 +57,17 @@ class HuggingFaceSourceLoader(SourceLoader):
             # Add sort key if not present
             if self.sort_key not in dataset.column_names:
                 logger.warning(
-                    f"Sort key '{self.sort_key}' not found in dataset '{self.dataset_name}'. Adding sequential index as sort key."
+                    f"Sort key '{self.sort_key}' not found in dataset '{self.path}'. Adding sequential index as sort key."
                 )
                 dataset = dataset.add_column(self.sort_key, list(range(len(dataset))))
             else:
                 dataset = dataset.sort(self.sort_key)
 
             self.data = dataset
-            logger.info(f"Loaded {len(dataset)} examples from {self.dataset_name}")
+            logger.info(f"Loaded {len(dataset)} examples from {self.path}")
 
         except Exception as e:
-            logger.error(f"Failed to load dataset {self.dataset_name}: {e}")
+            logger.error(f"Failed to load dataset {self.path}: {e}")
             raise
 
 
@@ -82,8 +82,9 @@ class LocalSourceLoader(SourceLoader):
             elif self.format == "jsonl":
                 # Load JSONL file (JSON Lines format)
                 import json
+
                 data_jsonl = []
-                with open(self.path, 'r', encoding='utf-8') as f:
+                with open(self.path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if line:  # Skip empty lines
@@ -177,7 +178,9 @@ class MultiSourceDatasetMerger(BaseModel):
             Tuple[str, str, Any, Callable],
         ],
     ] = PydanticField(..., description="필드 정의 딕셔너리 (Field 객체 또는 튜플)")
-    filter_func: Optional[Callable] = PydanticField(None, description="전역 필터 함수")
+    filter_func: Optional[Callable] = PydanticField(
+        default=None, description="전역 필터 함수"
+    )
     max_samples: Optional[int] = None
 
     # private
@@ -402,9 +405,10 @@ class MultiSourceDatasetMerger(BaseModel):
         elif format == "jsonl":
             # Save as JSONL (JSON Lines format)
             import json
-            with open(path, 'w', encoding='utf-8') as f:
+
+            with open(path, "w", encoding="utf-8") as f:
                 for item in self.data:
-                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
         elif format == "csv":
             self.data.to_csv(path)
         elif format == "parquet":
