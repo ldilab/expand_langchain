@@ -72,13 +72,23 @@ class HuggingFaceSourceLoader(SourceLoader):
 
 
 class LocalSourceLoader(SourceLoader):
-    format: str = "json"  # json, csv, parquet, arrow, yaml
+    format: str = "json"  # json, jsonl, csv, parquet, arrow, yaml
 
     def run(self):
         """Load dataset from local file"""
         try:
             if self.format == "json":
                 dataset = Dataset.from_json(self.path)
+            elif self.format == "jsonl":
+                # Load JSONL file (JSON Lines format)
+                import json
+                data_jsonl = []
+                with open(self.path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:  # Skip empty lines
+                            data_jsonl.append(json.loads(line))
+                dataset = Dataset.from_list(data_jsonl)
             elif self.format == "csv":
                 dataset = Dataset.from_csv(self.path)
             elif self.format == "parquet":
@@ -389,6 +399,12 @@ class MultiSourceDatasetMerger(BaseModel):
 
         if format == "json":
             self.data.to_json(path)
+        elif format == "jsonl":
+            # Save as JSONL (JSON Lines format)
+            import json
+            with open(path, 'w', encoding='utf-8') as f:
+                for item in self.data:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
         elif format == "csv":
             self.data.to_csv(path)
         elif format == "parquet":
