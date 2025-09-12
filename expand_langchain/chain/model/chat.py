@@ -7,12 +7,13 @@ from langchain.schema import BaseMessage, ChatResult
 from langchain_community.chat_models import ChatOllama
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from pydantic import SecretStr
 
 from .custom_api.snowflake import ChatSnowflakeCortex
 
 
 class GeneralChatModel(BaseChatModel):
-    model: Optional[str] = None
+    model: str
     max_tokens: int
     temperature: float
     top_p: float
@@ -32,22 +33,23 @@ class GeneralChatModel(BaseChatModel):
             return AzureChatOpenAI(
                 azure_endpoint=os.environ["AZURE_ENDPOINT"],
                 api_version=os.environ["AZURE_API_VERSION"],
-                api_key=os.environ["AZURE_API_KEY"],
+                api_key=SecretStr(os.environ["AZURE_API_KEY"]),
                 azure_deployment=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
                 model_kwargs={"top_p": self.top_p},
                 max_retries=self.max_retries,
             )
-
         elif self.platform == "openai":
+            api_key = os.environ.get("OPENAI_API_KEY", "")
             return ChatOpenAI(
-                openai_api_key=os.environ["OPENAI_API_KEY"],
+                api_key=SecretStr(api_key) if api_key else None,
                 model=self.model,
-                max_tokens=self.max_tokens,
+                max_completion_tokens=self.max_tokens,
                 temperature=self.temperature,
                 top_p=self.top_p,
                 max_retries=self.max_retries,
+                base_url=os.environ.get("OPENAI_API_BASE", None)
             )
 
         elif self.platform == "open_webui":

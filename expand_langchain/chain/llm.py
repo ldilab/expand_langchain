@@ -54,3 +54,17 @@ class LLMChain(RunnableSerializable):
             output[self.chat_history_key] = chat_history.to_messages()
 
         return output
+
+    async def ainvoke(self, input, config=None, **kwargs):
+        result = await self._chain.ainvoke(input, config, **kwargs)
+        chat_history = await self._prompt.ainvoke(input, config, **kwargs)
+
+        output = {
+            f"{self.key}_raw": result,
+            self.key: await self.parser.ainvoke(result, config, **kwargs),
+        }
+
+        if isinstance(self.chat_history_key, str):
+            output[self.chat_history_key] = chat_history.to_messages()
+
+        return output

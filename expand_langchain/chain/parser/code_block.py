@@ -26,8 +26,8 @@ class CodeBlockOutputParser(BaseOutputParser[str]):
         match = re.search(pattern, text, re.DOTALL)
 
         if match:
-            # Extract the code content and strip leading/trailing whitespace
-            code_content = match.group(1).strip()
+            matches = re.findall(pattern, text, re.DOTALL)
+            code_content = matches[-1].strip()
             return code_content
         else:
             raise OutputParserException(
