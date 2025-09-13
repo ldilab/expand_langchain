@@ -6,13 +6,14 @@ from pathlib import Path
 from traceback import format_exc
 from typing import Optional
 
-from datasets import Dataset
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
+
+from datasets import Dataset
 
 from .config_registry import get_config
 from .dataset_registry import get_dataset
@@ -158,7 +159,7 @@ class Generator(BaseModel):
             }
 
             if self.langfuse_on:
-                from langfuse.callback import CallbackHandler
+                from langfuse.langchain import CallbackHandler
 
                 langfuse_handler = CallbackHandler()
                 config["callbacks"].append(langfuse_handler)
@@ -194,6 +195,7 @@ class Generator(BaseModel):
         class CustomEncoder(json.JSONEncoder):
             def default(self, obj):
                 from langchain_core.messages.base import BaseMessage
+                from pydantic import BaseModel
 
                 if isinstance(obj, BaseMessage):
                     return {
@@ -204,6 +206,24 @@ class Generator(BaseModel):
                         "name": obj.name,
                         "id": obj.id,
                     }
+                elif isinstance(obj, BaseModel):
+                    # Handle Pydantic models by converting to dict
+                    return obj.model_dump()
+                elif hasattr(obj, "__dict__"):
+                    # Handle objects with __dict__ attribute
+                    return obj.__dict__
+                elif hasattr(obj, "_asdict"):
+                    # Handle namedtuples
+                    return obj._asdict()
+                elif isinstance(obj, (set, frozenset)):
+                    # Handle sets
+                    return list(obj)
+                elif hasattr(obj, "__iter__") and not isinstance(obj, (str, bytes)):
+                    # Handle other iterables (but not strings/bytes)
+                    try:
+                        return list(obj)
+                    except:
+                        pass
                 try:
                     return super().default(obj)
                 except TypeError:

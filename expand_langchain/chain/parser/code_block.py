@@ -7,6 +7,12 @@ from langchain_core.output_parsers import BaseOutputParser
 class CodeBlockOutputParser(BaseOutputParser[str]):
     """Custom parser for code blocks."""
 
+    def get_format_instructions(self) -> str:
+        return (
+            "The output should be a code block enclosed in triple backticks. "
+            "For example:\n```plaintext\n# Your code here\n```"
+        )
+
     def parse(self, text: str) -> str:
         """
         Extract code block content from text enclosed with triple backticks.

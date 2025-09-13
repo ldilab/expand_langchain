@@ -36,6 +36,9 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
                 template_str = f.read()
             messages.append(SMPT.from_template(template_str, template_format="jinja2"))
 
+        if not messages:
+            messages.append(SMPT.from_template("", template_format="jinja2"))
+
         if chat_history_key and chat_history_len > 0:
             messages.append(
                 MessagesPlaceholder(variable_name=chat_history_key),
