@@ -11,7 +11,7 @@ from .prompt.chat import CustomChatPromptTemplate
 
 class LLMChain(RunnableSerializable):
     key: str
-    parser: BaseOutputParser
+    parser: Runnable
 
     chat_history_key: Optional[str] = Field(default=None)
     chat_history_len: int = Field(default=0)

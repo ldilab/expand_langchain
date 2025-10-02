@@ -1,15 +1,16 @@
+import hashlib
+import json
 import logging
+import os
 from abc import abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, cast
 
 import yaml
 from pydantic import BaseModel, ConfigDict
 from pydantic import Field as PydanticField
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from tqdm import tqdm
-
-from datasets import Dataset, load_dataset
 
 logger = logging.getLogger(__name__)
 
@@ -19,13 +20,13 @@ class SourceLoader(BaseModel):
     path: str
 
     # private
-    data: Optional[Dataset] = None
+    data: Optional[List[Dict[str, Any]]] = None
 
     # pydantic
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @abstractmethod
-    def run(self):
+    def run(self) -> "SourceLoader":
         pass
 
 
@@ -38,37 +39,36 @@ class HuggingFaceSourceLoader(SourceLoader):
     num_proc: Optional[int] = None
 
     def run(self):
-        """Load dataset from Hugging Face Hub"""
+        """Load data from Hugging Face dataset"""
         try:
+            from datasets import Dataset, load_dataset  # type: ignore
+        except ImportError:
+            raise ImportError(
+                "datasets library is required for HuggingFaceSourceLoader. Install with: pip install datasets"
+            )
+
+        if self.config_name:
             dataset = load_dataset(
                 self.path,
                 name=self.config_name,
                 split=self.split,
-                revision=self.revision,
-                cache_dir=self.cache_dir,
-                streaming=self.streaming,
-                num_proc=self.num_proc,
+            )
+        else:
+            dataset = load_dataset(
+                self.path,
+                split=self.split,
             )
 
-            # Convert to regular Dataset if it's a streaming dataset
+        # Convert to generator if needed
+        if hasattr(dataset, "to_iterable_dataset"):
             if self.streaming:
                 dataset = Dataset.from_generator(lambda: dataset)
 
-            # Add sort key if not present
-            if self.sort_key not in dataset.column_names:
-                logger.warning(
-                    f"Sort key '{self.sort_key}' not found in dataset '{self.path}'. Adding sequential index as sort key."
-                )
-                dataset = dataset.add_column(self.sort_key, list(range(len(dataset))))
-            else:
-                dataset = dataset.sort(self.sort_key)
-
-            self.data = dataset
-            logger.info(f"Loaded {len(dataset)} examples from {self.path}")
-
-        except Exception as e:
-            logger.error(f"Failed to load dataset {self.path}: {e}")
-            raise
+        self.data = list(dataset)
+        logger.info(
+            f"Loaded {len(self.data)} samples from Hugging Face dataset {self.path}"
+        )
+        return self
 
 
 class LocalSourceLoader(SourceLoader):
@@ -78,45 +78,78 @@ class LocalSourceLoader(SourceLoader):
         """Load dataset from local file"""
         try:
             if self.format == "json":
-                dataset = Dataset.from_json(self.path)
+                import json
+
+                with open(self.path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    data_list = json.loads(content)
+                    if not isinstance(data_list, list):
+                        # Single object case
+                        data_list = [data_list]
+
             elif self.format == "jsonl":
                 # Load JSONL file (JSON Lines format)
                 import json
 
-                data_jsonl = []
+                data_list = []
                 with open(self.path, "r", encoding="utf-8") as f:
                     for line in f:
                         line = line.strip()
                         if line:  # Skip empty lines
-                            data_jsonl.append(json.loads(line))
-                dataset = Dataset.from_list(data_jsonl)
+                            data_list.append(json.loads(line))
             elif self.format == "csv":
-                dataset = Dataset.from_csv(self.path)
+                import pandas as pd
+
+                df = pd.read_csv(self.path)
+                data_list = df.to_dict("records")
             elif self.format == "parquet":
-                dataset = Dataset.from_parquet(self.path)
+                import pandas as pd
+
+                df = pd.read_parquet(self.path)
+                data_list = df.to_dict("records")
             elif self.format == "arrow":
-                dataset = Dataset.from_file(self.path)
+                try:
+                    import pyarrow as pa
+                    import pyarrow.parquet as pq
+
+                    table = pq.read_table(self.path)
+                    data_list = table.to_pylist()
+                except ImportError:
+                    raise ImportError(
+                        "pyarrow is required for arrow format. Install with: pip install pyarrow"
+                    )
             elif self.format == "yaml" or self.format == "yml":
                 # Load YAML file and convert to dataset
                 data_yaml = yaml.load(
                     Path(self.path).read_text(), Loader=yaml.FullLoader
                 )
-                dataset = Dataset.from_list(data_yaml)
+                data_list = data_yaml if isinstance(data_yaml, list) else [data_yaml]
             else:
                 raise ValueError(f"Unsupported format: {self.format}")
 
-            # Add sort key if not present
-            if self.sort_key not in dataset.column_names:
-                dataset = dataset.add_column(self.sort_key, list(range(len(dataset))))
-            else:
-                dataset = dataset.sort(self.sort_key)
+            # Add sort key if not present and sort
+            column_names = set()
+            if data_list:
+                column_names = set(data_list[0].keys())
 
-            self.data = dataset
-            logger.info(f"Loaded {len(dataset)} examples from {self.path}")
+            if self.sort_key not in column_names:
+                for i, item in enumerate(data_list):
+                    item[self.sort_key] = i
+
+            # Sort by sort_key
+            try:
+                data_list.sort(key=lambda x: x.get(self.sort_key, 0))
+            except Exception as e:
+                logger.warning(f"Failed to sort by '{self.sort_key}': {e}")
+
+            self.data = cast(List[Dict[str, Any]], data_list)
+            logger.info(f"Loaded {len(data_list)} examples from {self.path}")
 
         except Exception as e:
             logger.error(f"Failed to load dataset from {self.path}: {e}")
             raise
+
+        return self
 
 
 class MultiSourceDatasetMerger(BaseModel):
@@ -147,11 +180,13 @@ class MultiSourceDatasetMerger(BaseModel):
             if len(field_tuple) == 2:
                 # (source, key)
                 source, key = field_tuple
-                return cls(source=source, key=key)
+                return cls(source=source, key=key, transform=None, default_value=None)
             elif len(field_tuple) == 3:
                 # (source, key, default_value)
                 source, key, default_value = field_tuple
-                return cls(source=source, key=key, default_value=default_value)
+                return cls(
+                    source=source, key=key, transform=None, default_value=default_value
+                )
             elif len(field_tuple) == 4:
                 # (source, key, default_value, transform)
                 source, key, default_value, transform = field_tuple
@@ -169,22 +204,18 @@ class MultiSourceDatasetMerger(BaseModel):
         def __str__(self):
             return f"Field(source='{self.source}', key='{self.key}', default={self.default_value})"
 
-    fields: Dict[
-        str,
-        Union[
-            MergerField,
-            Tuple[str, str],
-            Tuple[str, str, Any],
-            Tuple[str, str, Any, Callable],
-        ],
-    ] = PydanticField(..., description="필드 정의 딕셔너리 (Field 객체 또는 튜플)")
+    fields: Dict[str, MergerField] = PydanticField(
+        ..., description="필드 정의 딕셔너리"
+    )
     filter_func: Optional[Callable] = PydanticField(
         default=None, description="전역 필터 함수"
     )
     max_samples: Optional[int] = None
 
     # private
-    data: Optional[Dataset] = None
+    data_cache_dir: Optional[str] = None
+    data_file_path: Optional[str] = None
+    total_samples: int = 0
     lookup_tables: Dict[str, Dict[Any, Dict[str, Any]]] = PydanticField(
         default_factory=dict, exclude=True
     )
@@ -192,30 +223,45 @@ class MultiSourceDatasetMerger(BaseModel):
     # pydantic
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    @model_validator(mode="after")
-    def convert_tuple_fields(self):
-        """모델 검증 후 튜플 형태의 필드를 Field 객체로 변환"""
+    @classmethod
+    def create_with_tuple_fields(
+        cls,
+        sources: Dict[str, SourceLoader],
+        primary_key: str,
+        fields: Dict[
+            str,
+            Union[
+                "MultiSourceDatasetMerger.MergerField",
+                Tuple[str, str],
+                Tuple[str, str, Any],
+                Tuple[str, str, Any, Callable],
+            ],
+        ],
+        **kwargs,
+    ):
+        """tuple 필드를 지원하는 생성자"""
         converted_fields = {}
 
-        for field_name, field_config in self.fields.items():
+        for field_name, field_config in fields.items():
             if isinstance(field_config, tuple):
                 try:
-                    converted_fields[field_name] = self.MergerField.from_tuple(
+                    converted_fields[field_name] = cls.MergerField.from_tuple(
                         field_config
                     )
                 except Exception as e:
                     raise ValueError(
                         f"Failed to convert field '{field_name}' from tuple: {e}"
                     )
-            elif isinstance(field_config, self.MergerField):
+            elif isinstance(field_config, cls.MergerField):
                 converted_fields[field_name] = field_config
             else:
                 raise ValueError(
                     f"Field '{field_name}' must be MergerField object or tuple"
                 )
 
-        self.fields = converted_fields
-        return self
+        return cls(
+            sources=sources, primary_key=primary_key, fields=converted_fields, **kwargs
+        )
 
     @model_validator(mode="after")
     def validate_field_sources(self):
@@ -237,6 +283,9 @@ class MultiSourceDatasetMerger(BaseModel):
         """
         logger.info("Starting dataset reconstruction...")
 
+        # Setup cache directory
+        self._setup_cache_directory()
+
         # 1. Load all source datasets
         logger.info("Loading source datasets...")
         for source_name, source_loader in tqdm(
@@ -244,7 +293,7 @@ class MultiSourceDatasetMerger(BaseModel):
         ):
             source_loader.run()
             logger.info(
-                f"Loaded source '{source_name}' with {len(source_loader.data)} samples"
+                f"Loaded source '{source_name}' with {len(source_loader.data or [])} samples"
             )
 
         # 2. Build lookup tables for fast access
@@ -256,47 +305,92 @@ class MultiSourceDatasetMerger(BaseModel):
         primary_keys = self._find_common_primary_keys()
         logger.info(f"Found {len(primary_keys)} common primary keys")
 
-        # 4. Build reconstructed dataset
+        # 4. Build reconstructed dataset and save to disk
         logger.info("Reconstructing dataset with custom fields...")
-        reconstructed_data = []
-
-        for pk in tqdm(primary_keys, desc="Reconstructing samples"):
-            try:
-                sample = self._build_sample(pk)
-                if sample is not None:
-                    reconstructed_data.append(sample)
-            except Exception as e:
-                logger.warning(f"Failed to build sample for primary key {pk}: {e}")
-                continue
-
-        # 5. Create final dataset
-        if not reconstructed_data:
-            logger.warning("No samples were successfully reconstructed")
-            self.data = Dataset.from_list([])
-        else:
-            self.data = Dataset.from_list(reconstructed_data)
-
-            # Apply global filter if provided
-            if self.filter_func:
-                logger.info("Applying global filter...")
-                self.data = self.data.filter(self.filter_func)
-
-            # Limit samples if specified
-            if self.max_samples and len(self.data) > self.max_samples:
-                logger.info(f"Limiting dataset to {self.max_samples} samples")
-                self.data = self.data.select(range(self.max_samples))
+        self._build_and_save_dataset(primary_keys)
 
         logger.info(
-            f"Dataset reconstruction complete. Final dataset has {len(self.data)} samples"
+            f"Dataset reconstruction complete. Final dataset has {self.total_samples} samples"
         )
         return self
+
+    def _setup_cache_directory(self):
+        """캐시 디렉토리 설정"""
+        # Create cache directory based on configuration hash
+        config_hash = self._get_config_hash()
+        self.data_cache_dir = f"./data/merged_datasets/{config_hash}"
+        os.makedirs(self.data_cache_dir, exist_ok=True)
+        self.data_file_path = os.path.join(self.data_cache_dir, "data.jsonl")
+
+        logger.info(f"Using cache directory: {self.data_cache_dir}")
+
+    def _get_config_hash(self) -> str:
+        """설정 기반 해시 생성"""
+        config_str = json.dumps(
+            {
+                "sources": {
+                    name: {
+                        "path": loader.path,
+                        "format": getattr(loader, "format", "unknown"),
+                    }
+                    for name, loader in self.sources.items()
+                },
+                "primary_key": self.primary_key,
+                "fields": {name: str(field) for name, field in self.fields.items()},
+                "max_samples": self.max_samples,
+            },
+            sort_keys=True,
+        )
+        return hashlib.md5(config_str.encode()).hexdigest()
+
+    def _build_and_save_dataset(self, primary_keys: List[Any]):
+        """데이터셋을 재구축하고 디스크에 저장"""
+        if not self.data_file_path:
+            raise ValueError(
+                "Data file path not set. Call _setup_cache_directory first."
+            )
+
+        processed_count = 0
+        saved_count = 0
+
+        with open(self.data_file_path, "w", encoding="utf-8") as f:
+            for pk in tqdm(primary_keys, desc="Reconstructing samples"):
+                try:
+                    sample = self._build_sample(pk)
+                    if sample is not None:
+                        # Apply filter if provided
+                        if self.filter_func and not self.filter_func(sample):
+                            continue
+
+                        # Check max samples limit
+                        if self.max_samples and saved_count >= self.max_samples:
+                            break
+
+                        # Save to disk
+                        f.write(json.dumps(sample, ensure_ascii=False) + "\n")
+                        saved_count += 1
+
+                    processed_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to build sample for primary key {pk}: {e}")
+                    continue
+
+        self.total_samples = saved_count
+        logger.info(
+            f"Processed {processed_count} samples, saved {saved_count} samples to disk"
+        )
 
     def _buildlookup_tables(self):
         """각 소스별로 primary key를 인덱스로 하는 lookup table을 생성합니다"""
         self.lookup_tables = {}
 
         for source_name, source_loader in self.sources.items():
-            if self.primary_key not in source_loader.data.column_names:
+            if not source_loader.data:
+                logger.warning(f"No data found in source '{source_name}'")
+                continue
+
+            # Check if primary key exists in the data
+            if source_loader.data and self.primary_key not in source_loader.data[0]:
                 logger.warning(
                     f"Primary key '{self.primary_key}' not found in source '{source_name}'"
                 )
@@ -389,335 +483,99 @@ class MultiSourceDatasetMerger(BaseModel):
 
         return value
 
-    def get_data(self) -> Dataset:
-        """재구축된 데이터셋을 반환합니다"""
-        if not hasattr(self, "data") or self.data is None:
+    def get_data(self) -> List[Dict[str, Any]]:
+        """재구축된 데이터셋을 반환합니다 (메모리에 로드)"""
+        if not self.data_file_path or not os.path.exists(self.data_file_path):
             raise ValueError("Dataset not built yet. Call run() first.")
-        return self.data
+
+        data = []
+        with open(self.data_file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    data.append(json.loads(line))
+        return data
+
+    def iter_data(self):
+        """데이터를 하나씩 반복하여 반환 (메모리 효율적)"""
+        if not self.data_file_path or not os.path.exists(self.data_file_path):
+            raise ValueError("Dataset not built yet. Call run() first.")
+
+        with open(self.data_file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
+
+    def get_sample(self, index: int) -> Dict[str, Any]:
+        """특정 인덱스의 샘플을 반환"""
+        if not self.data_file_path or not os.path.exists(self.data_file_path):
+            raise ValueError("Dataset not built yet. Call run() first.")
+
+        if index < 0 or index >= self.total_samples:
+            raise IndexError(f"Index {index} out of range [0, {self.total_samples})")
+
+        with open(self.data_file_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i == index:
+                    return json.loads(line.strip())
+
+        raise IndexError(f"Could not find sample at index {index}")
+
+    def get_batch(self, start: int, size: int) -> List[Dict[str, Any]]:
+        """배치 단위로 데이터를 반환"""
+        if not self.data_file_path or not os.path.exists(self.data_file_path):
+            raise ValueError("Dataset not built yet. Call run() first.")
+
+        if start < 0 or start >= self.total_samples:
+            raise IndexError(
+                f"Start index {start} out of range [0, {self.total_samples})"
+            )
+
+        batch = []
+        with open(self.data_file_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= start and len(batch) < size:
+                    batch.append(json.loads(line.strip()))
+                elif len(batch) >= size:
+                    break
+
+        return batch
+
+    def __len__(self) -> int:
+        """데이터셋 크기 반환"""
+        return self.total_samples
 
     def save(self, path: str, format: str = "json"):
         """재구축된 데이터셋을 파일로 저장합니다"""
-        if not hasattr(self, "data") or self.data is None:
+        if not self.data_file_path or not os.path.exists(self.data_file_path):
             raise ValueError("Dataset not built yet. Call run() first.")
 
         if format == "json":
-            self.data.to_json(path)
-        elif format == "jsonl":
-            # Save as JSONL (JSON Lines format)
-            import json
-
+            # Save as JSON array
+            data = self.get_data()
             with open(path, "w", encoding="utf-8") as f:
-                for item in self.data:
-                    f.write(json.dumps(item, ensure_ascii=False) + "\n")
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        elif format == "jsonl":
+            # Copy JSONL file
+            import shutil
+
+            shutil.copy2(self.data_file_path, path)
         elif format == "csv":
-            self.data.to_csv(path)
+            # Use pandas for CSV export
+            import pandas as pd
+
+            data = self.get_data()
+            df = pd.DataFrame(data)
+            df.to_csv(path, index=False)
         elif format == "parquet":
-            self.data.to_parquet(path)
+            # Use pandas for Parquet export
+            import pandas as pd
+
+            data = self.get_data()
+            df = pd.DataFrame(data)
+            df.to_parquet(path, index=False)
         else:
             raise ValueError(f"Unsupported format: {format}")
 
         logger.info(f"Dataset saved to {path} in {format} format")
-
-
-if __name__ == "__main__":
-    """테스트 코드"""
-    import json
-    import os
-    import tempfile
-
-    # 로깅 설정
-    logging.basicConfig(level=logging.INFO)
-
-    print("=== DatasetBuilder 테스트 시작 ===")
-
-    # 임시 디렉토리 생성
-    with tempfile.TemporaryDirectory() as temp_dir:
-
-        # 1. 테스트 데이터 생성
-        print("\n1. 테스트 데이터 생성 중...")
-
-        # JSON 데이터 생성
-        json_data = [
-            {"id": 1, "question": "What is diabetes?", "category": "medical"},
-            {"id": 2, "question": "How to treat fever?", "category": "medical"},
-            {"id": 3, "question": "What is Python?", "category": "programming"},
-        ]
-        json_path = os.path.join(temp_dir, "questions.json")
-        with open(json_path, "w") as f:
-            json.dump(json_data, f)
-
-        # YAML 데이터 생성
-        yaml_data = [
-            {"id": 1, "answer": "A metabolic disorder", "difficulty": 3},
-            {"id": 2, "answer": "Use fever reducers", "difficulty": 2},
-            {"id": 3, "answer": "A programming language", "difficulty": 1},
-        ]
-        yaml_path = os.path.join(temp_dir, "answers.yaml")
-        with open(yaml_path, "w") as f:
-            yaml.dump(yaml_data, f)
-
-        # CSV 데이터 생성
-        csv_data = "id,author,source\n1,Dr. Smith,Medical Journal\n2,Dr. Jones,Health Guide\n3,John Doe,Tech Blog\n"
-        csv_path = os.path.join(temp_dir, "metadata.csv")
-        with open(csv_path, "w") as f:
-            f.write(csv_data)
-
-        print(f"테스트 데이터 생성 완료:")
-        print(f"  - JSON: {json_path}")
-        print(f"  - YAML: {yaml_path}")
-        print(f"  - CSV: {csv_path}")
-
-        # 2. 소스 로더 생성 및 테스트
-        print("\n2. 소스 로더 테스트 중...")
-
-        # JSON 로더 테스트
-        json_loader = LocalSourceLoader(sort_key="id", path=json_path, format="json")
-        json_loader.run()
-        print(f"JSON 로더: {len(json_loader.data)} 샘플 로드됨")
-
-        # YAML 로더 테스트
-        yaml_loader = LocalSourceLoader(sort_key="id", path=yaml_path, format="yaml")
-        yaml_loader.run()
-        print(f"YAML 로더: {len(yaml_loader.data)} 샘플 로드됨")
-
-        # CSV 로더 테스트
-        csv_loader = LocalSourceLoader(sort_key="id", path=csv_path, format="csv")
-        csv_loader.run()
-        print(f"CSV 로더: {len(csv_loader.data)} 샘플 로드됨")
-
-        # 3. 변환 함수 정의
-        def text_length(text):
-            return len(str(text)) if text else 0
-
-        def categorize_difficulty(diff):
-            if diff <= 1:
-                return "easy"
-            elif diff <= 2:
-                return "medium"
-            else:
-                return "hard"
-
-        # 4. DatasetBuilder 테스트
-        print("\n3. DatasetBuilder 테스트 중...")
-
-        sources = {
-            "questions": json_loader,
-            "answers": yaml_loader,
-            "metadata": csv_loader,
-        }
-
-        fields = {
-            "question": MultiSourceDatasetMerger.MergerField(
-                source="questions", key="question", default_value=""
-            ),
-            "answer": MultiSourceDatasetMerger.MergerField(
-                source="answers", key="answer", default_value=""
-            ),
-            "question_length": MultiSourceDatasetMerger.MergerField(
-                source="questions",
-                key="question",
-                transform=text_length,
-                default_value=0,
-            ),
-            "difficulty_category": MultiSourceDatasetMerger.MergerField(
-                source="answers",
-                key="difficulty",
-                transform=categorize_difficulty,
-                default_value="medium",
-            ),
-            "author": MultiSourceDatasetMerger.MergerField(
-                source="metadata", key="author", default_value="Unknown"
-            ),
-            "category": MultiSourceDatasetMerger.MergerField(
-                source="questions", key="category", default_value="general"
-            ),
-        }
-
-        # 의료 관련 필터
-        def is_medical(sample):
-            return sample.get("category") == "medical"
-
-        builder = MultiSourceDatasetMerger(
-            sources=sources,
-            primary_key="id",
-            fields=fields,
-            filter_func=is_medical,  # 의료 관련 내용만 필터링
-            max_samples=10,
-        )
-
-        # 데이터셋 재구축 실행
-        result = builder.run()
-
-        # 5. 결과 확인
-        print("\n4. 재구축 결과:")
-        reconstructed_dataset = builder.get_data()
-        print(f"  - 총 샘플 수: {len(reconstructed_dataset)}")
-        print(f"  - 컬럼: {reconstructed_dataset.column_names}")
-
-        if len(reconstructed_dataset) > 0:
-            print("\n5. 첫 번째 샘플:")
-            first_sample = reconstructed_dataset[0]
-            for key, value in first_sample.items():
-                print(f"  - {key}: {value}")
-
-        # 6. 데이터셋 저장 테스트
-        print("\n6. 데이터셋 저장 테스트...")
-        output_path = os.path.join(temp_dir, "reconstructed_dataset.json")
-        builder.save(output_path, format="json")
-
-        # 저장된 파일 확인
-        if os.path.exists(output_path):
-            # Hugging Face datasets의 to_json은 JSONL 형식으로 저장함
-            saved_data = []
-            with open(output_path, "r") as f:
-                for line in f:
-                    if line.strip():
-                        saved_data.append(json.loads(line))
-            print(f"  - 저장 완료: {len(saved_data)} 샘플")
-
-        print("\n=== 모든 테스트 완료 ===")
-
-        # 7. 예외 상황 테스트
-        print("\n7. 예외 상황 테스트...")
-
-        try:
-            # 존재하지 않는 파일로 테스트
-            invalid_loader = LocalSourceLoader(
-                sort_key="id", path="/nonexistent/file.json", format="json"
-            )
-            invalid_loader.run()
-        except Exception as e:
-            print(f"  - 예상된 오류 처리됨: {type(e).__name__}")
-
-        try:
-            # 잘못된 형식으로 테스트
-            invalid_format_loader = LocalSourceLoader(
-                sort_key="id", path=json_path, format="invalid_format"
-            )
-            invalid_format_loader.run()
-        except Exception as e:
-            print(f"  - 예상된 오류 처리됨: {type(e).__name__}")
-
-        print("  - 예외 처리 테스트 완료")
-
-        # 8. 튜플 형태 필드 정의 테스트
-        print("\n8. 튜플 형태 필드 정의 테스트...")
-
-        # 테스트용 쿼리 데이터 생성
-        queries_data = [
-            {
-                "task_id": "T001",
-                "difficulty": 3,
-                "patient_id": "P001",
-                "department": "cardiology",
-                "question": "Find all patients with heart disease",
-                "sql_answer-gt": "SELECT * FROM patients WHERE diagnosis = 'heart disease'",
-                "nl_answer-gt": "Patients with heart disease diagnosis",
-            },
-            {
-                "task_id": "T002",
-                "difficulty": 2,
-                "patient_id": "P002",
-                "department": "neurology",
-                "question": "List neurological conditions",
-                "sql_answer-gt": "SELECT * FROM conditions WHERE type = 'neurological'",
-                "nl_answer-gt": "All neurological conditions",
-            },
-        ]
-
-        queries_path = os.path.join(temp_dir, "queries.json")
-        with open(queries_path, "w") as f:
-            json.dump(queries_data, f)
-
-        # 쿼리 로더 생성
-        queries_loader = LocalSourceLoader(
-            sort_key="task_id", path=queries_path, format="json"
-        )
-
-        # 튜플 형태로 필드 정의 (사용자가 제공한 형태)
-        tuple_fields = {
-            "task_id": ("queries", "task_id"),
-            "difficulty": ("queries", "difficulty"),
-            "patient_id": ("queries", "patient_id"),
-            "department": ("queries", "department"),
-            "question": ("queries", "question"),
-            "sql_answer-gt": ("queries", "sql_answer-gt"),
-            "nl_answer-gt": ("queries", "nl_answer-gt"),
-        }
-
-        try:
-            tuple_builder = MultiSourceDatasetMerger(
-                sources={"queries": queries_loader},
-                primary_key="task_id",
-                fields=tuple_fields,
-            )
-
-            print("  - 튜플 필드 정의 성공적으로 파싱됨")
-
-            # 데이터셋 재구축 실행
-            tuple_result = tuple_builder.run()
-            tuple_dataset = tuple_builder.get_data()
-
-            print(f"  - 튜플 기반 재구축 완료: {len(tuple_dataset)} 샘플")
-            print(f"  - 컬럼: {tuple_dataset.column_names}")
-
-            if len(tuple_dataset) > 0:
-                print("  - 첫 번째 샘플:")
-                first_sample = tuple_dataset[0]
-                for key, value in first_sample.items():
-                    if isinstance(value, str) and len(value) > 50:
-                        print(f"    {key}: {value[:50]}...")
-                    else:
-                        print(f"    {key}: {value}")
-
-        except Exception as e:
-            print(f"  - 튜플 테스트 실패: {e}")
-            import traceback
-
-            traceback.print_exc()
-
-        # 9. 다양한 튜플 형태 테스트
-        print("\n9. 다양한 튜플 형태 테스트...")
-
-        # 2-4개 요소를 가진 다양한 튜플 테스트
-        def upper_transform(text):
-            return str(text).upper()
-
-        mixed_fields = {
-            # 2개 요소: (source, key)
-            "simple_field": ("queries", "department"),
-            # 3개 요소: (source, key, default_value)
-            "with_default": ("queries", "missing_field", "DEFAULT_VALUE"),
-            # 4개 요소: (source, key, default_value, transform)
-            "with_transform": ("queries", "department", "unknown", upper_transform),
-        }
-
-        try:
-            mixed_builder = MultiSourceDatasetMerger(
-                sources={"queries": queries_loader},
-                primary_key="task_id",
-                fields=mixed_fields,
-            )
-
-            print("  - 다양한 튜플 형태 파싱 성공")
-
-            mixed_result = mixed_builder.run()
-            mixed_dataset = mixed_builder.get_data()
-
-            print(f"  - 혼합 필드 재구축 완료: {len(mixed_dataset)} 샘플")
-
-            if len(mixed_dataset) > 0:
-                print("  - 변환 함수 적용 결과:")
-                first_sample = mixed_dataset[0]
-                print(f"    원본 department: {queries_data[0]['department']}")
-                print(
-                    f"    변환된 with_transform: {first_sample.get('with_transform')}"
-                )
-                print(f"    기본값 with_default: {first_sample.get('with_default')}")
-
-        except Exception as e:
-            print(f"  - 혼합 튜플 테스트 실패: {e}")
-
-        print("\n  - 튜플 필드 정의 테스트 완료")
-
-    print("\n=== 전체 테스트 완료 ===")

@@ -4,16 +4,15 @@ import logging
 import os
 from pathlib import Path
 from traceback import format_exc
-from typing import Optional
+from typing import Optional, cast
 
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
-
-from datasets import Dataset
 
 from .config_registry import get_config
 from .dataset_registry import get_dataset
@@ -36,13 +35,15 @@ class Generator(BaseModel):
     debug: bool = False
 
     api_keys_path: str = "api_keys.json"
+    id_key: str = "task_id"  # key name for id field in dataset
 
     langfuse_on: bool = False
 
     # private variables
-    root_node: Runnable = None
-    output_dir: Path = None
-    result_root: Path = None
+    root_node: Optional[Runnable] = None
+    output_dir: Optional[Path] = None
+    result_root: Optional[Path] = None
+    checkpoint_dir: Optional[Path] = None
 
     # pydantic config
     class Config:
@@ -71,6 +72,9 @@ class Generator(BaseModel):
             self.output_dir = Path(f"results/{self.run_name}")
             self.result_root = self.output_dir / "results"
             self.result_root.mkdir(parents=True, exist_ok=True)
+            # Initialize checkpoint directory for LangGraph time travel
+            self.checkpoint_dir = self.output_dir / "checkpoints"
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         if not self.cache_root and not self.rerun:
             self.cache_root = self.result_root
 
@@ -92,54 +96,165 @@ class Generator(BaseModel):
         dataset = get_dataset(self.dataset_name).run().get_data()
         self.root_node = get_config(self.config_name)
 
+        # Filter dataset according to parameters
         if n is not None:
-            dataset = dataset.select(range(min(n, len(dataset))))
+            dataset = dataset[: min(n, len(dataset))]
         elif start is not None and end is not None:
-            dataset = dataset.select(range(start, min(end, len(dataset))))
+            dataset = dataset[start : min(end, len(dataset))]
         elif ids is not None:
             if len(ids) > 0 and isinstance(ids[0], str):
-                if "id" in dataset.column_names:
-                    indices = []
-                    for i in range(len(dataset)):
-                        if str(dataset[i]["id"]) in ids:
-                            indices.append(i)
-                    dataset = dataset.select(indices)
+                # Check if dataset has specified id_key field
+                if dataset and self.id_key in dataset[0]:
+                    filtered_dataset = []
+                    for item in dataset:
+                        if str(item[self.id_key]) in ids:
+                            filtered_dataset.append(item)
+                    dataset = filtered_dataset
                 else:
-                    indices = []
-                    for i in range(len(dataset)):
+                    # Use index as id
+                    filtered_dataset = []
+                    for i, item in enumerate(dataset):
                         if str(i) in ids:
-                            indices.append(i)
-                    dataset = dataset.select(indices)
+                            filtered_dataset.append(item)
+                    dataset = filtered_dataset
             else:
-                indices = [i for i in ids if isinstance(i, int) and i < len(dataset)]
-                dataset = dataset.select(indices)
+                # Integer ids - use as indices
+                filtered_dataset = []
+                for i in ids:
+                    if isinstance(i, int) and 0 <= i < len(dataset):
+                        filtered_dataset.append(dataset[i])
+                dataset = filtered_dataset
         else:
             pass
 
-        asyncio.run(self._run(dataset))
+        # If root_node is a StateGraph, compile it with checkpointer
+        if isinstance(self.root_node, StateGraph):
+            asyncio.run(self._run_with_checkpointer(dataset))
+        else:
+            asyncio.run(self._run(dataset))
 
         return self
 
+    async def _run_with_checkpointer(self, dataset: list):
+        """Run with StateGraph compilation and checkpointer management"""
+        if self.save_on and self.checkpoint_dir:
+            # Use SQLiteSaver for persistent checkpointing
+            # Ensure the directory exists and use absolute path
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            db_path = str(self.checkpoint_dir.absolute() / "checkpoints.db")
+
+            # Use the async context manager properly - just the file path
+            async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
+                # Cast to StateGraph to access compile method
+                state_graph = cast(StateGraph, self.root_node)
+                compiled_graph = state_graph.compile(checkpointer=checkpointer)
+                # Temporarily replace root_node for execution
+                original_node = self.root_node
+                self.root_node = compiled_graph
+                await self._run(dataset)
+                self.root_node = original_node
+        else:
+            # Use in-memory checkpointer if saving is disabled
+            checkpointer = InMemorySaver()
+            # Cast to StateGraph to access compile method
+            state_graph = cast(StateGraph, self.root_node)
+            compiled_graph = state_graph.compile(checkpointer=checkpointer)
+            # Temporarily replace root_node for execution
+            original_node = self.root_node
+            self.root_node = compiled_graph
+            await self._run(dataset)
+            self.root_node = original_node
+
     async def _run(
         self,
-        dataset: Dataset,
+        dataset: list,
     ):
         tasks = []
         sem = asyncio.Semaphore(self.max_concurrency)
 
         for i in range(len(dataset)):
             target = dataset[i]
-            data_id = target.get("id", i) if isinstance(target, dict) else i
-            task = self._run_one(data_id, target, sem)
+            data_id = (
+                str(target.get(self.id_key, i)) if isinstance(target, dict) else str(i)
+            )
+            task = self._run_one(data_id, target, sem, priority=i)
             tasks.append(task)
 
         await tqdm_asyncio.gather(*tasks)
+
+    async def _check_and_log_checkpoint_loading(self, task_id: str, config: dict):
+        """Check if checkpoint exists and log if loading from checkpoint"""
+        if not self.save_on or not self.checkpoint_dir:
+            logging.debug(
+                f"Checkpoint check skipped for {task_id}: "
+                f"save_on={self.save_on}, checkpoint_dir={self.checkpoint_dir}"
+            )
+            return
+
+        # Check if checkpoint database exists first
+        db_path = self.checkpoint_dir / "checkpoints.db"
+        if not db_path.exists():
+            logging.debug(f"Checkpoint database not found for {task_id}: {db_path}")
+            return
+
+        logging.debug(f"Checking checkpoint for task {task_id} at {db_path}")
+
+        try:
+            # Use AsyncSqliteSaver's built-in methods to check for checkpoints
+            async with AsyncSqliteSaver.from_conn_string(
+                str(db_path.absolute())
+            ) as temp_checkpointer:
+                thread_config = config.get("configurable", {})
+                thread_id = thread_config.get("thread_id", "unknown")
+
+                # Try to get the latest checkpoint for this thread
+                from typing import cast
+
+                from langchain_core.runnables import RunnableConfig
+
+                runnable_config = cast(RunnableConfig, config)
+                existing_checkpoint = await temp_checkpointer.aget_tuple(
+                    runnable_config
+                )
+
+                if existing_checkpoint is not None:
+                    # Checkpoint exists, log the loading
+                    cp_config = existing_checkpoint.config.get("configurable", {})
+                    checkpoint_id = cp_config.get("checkpoint_id", "unknown")
+                    msg = (
+                        f"Loading from checkpoint for task {task_id} "
+                        f"(thread_id: {thread_id}, "
+                        f"checkpoint_id: {checkpoint_id})"
+                    )
+                    logging.info(msg)
+                    print(f"CHECKPOINT_LOG: {msg}")
+                else:
+                    # No checkpoint found, try to list all checkpoints
+                    checkpoint_list = []
+                    async for cp in temp_checkpointer.alist(runnable_config, limit=1):
+                        checkpoint_list.append(cp)
+
+                    if checkpoint_list:
+                        # Found checkpoints but couldn't get the specific one
+                        msg = (
+                            f"Checkpoints exist for task {task_id} "
+                            f"but none matches current config"
+                        )
+                        logging.debug(msg)
+                    else:
+                        # No checkpoints at all for this thread
+                        logging.debug(f"No checkpoints found for task {task_id}")
+
+        except Exception as e:
+            # If checkpoint retrieval fails, continue without logging
+            logging.debug(f"Could not check checkpoint for task {task_id}: {e}")
 
     async def _run_one(
         self,
         id: str,
         target: dict,
         sem: asyncio.Semaphore,
+        priority: int = 10,
     ):
         """
         Run the target and save the result as json file
@@ -156,18 +271,35 @@ class Generator(BaseModel):
                     "cache_root": self.cache_root,
                     "result_root": self.result_root,
                 },
+                # Add configurable keys for LangGraph checkpointer
+                "configurable": {
+                    "thread_id": f"thread_{id}",
+                    "checkpoint_ns": "",  # Match existing checkpoints
+                },
             }
 
-            if self.langfuse_on:
-                from langfuse.langchain import CallbackHandler
+            # Check if checkpoint exists and log if loading from checkpoint
+            # Use the converted id (with _ instead of /)
+            await self._check_and_log_checkpoint_loading(id, config)
 
-                langfuse_handler = CallbackHandler()
-                config["callbacks"].append(langfuse_handler)
+            if self.langfuse_on:
+                try:
+                    from langfuse.langchain import CallbackHandler
+
+                    langfuse_handler = CallbackHandler()
+                    config["callbacks"].append(langfuse_handler)
+                except ImportError as e:
+                    logging.warning(f"Failed to import langfuse: {e}")
+                    logging.warning("Continuing without langfuse logging")
+                except Exception as e:
+                    logging.warning(f"Failed to initialize langfuse: {e}")
+                    logging.warning("Continuing without langfuse logging")
 
             try:
-                result = await self.root_node.ainvoke(
+                result = await self.root_node.ainvoke(  # type: ignore
                     target,
-                    config=config,
+                    config=config,  # type: ignore
+                    priority=priority,
                 )
 
                 logging.info(f"Done: {id}")

@@ -53,7 +53,7 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
         # 커스텀 생성자를 사용하여 속성과 함께 객체 생성
         result = cls(
             messages=messages,
-            chat_history_key=chat_history_key,
+            chat_history_key=chat_history_key or "chat_history",
             chat_history_len=chat_history_len,
             **kwargs,
         )
