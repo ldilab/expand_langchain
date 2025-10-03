@@ -261,6 +261,25 @@ class Generator(BaseModel):
         """
         id = str(id).replace("/", "_")
 
+        # Skip if result file already exists and rerun is False
+        if not self.rerun and self.result_root:
+            result_file = self.result_root / f"{id}.json"
+            if result_file.exists():
+                # Load and check existing result
+                try:
+                    with open(result_file, "r") as f:
+                        existing_result = json.load(f)
+
+                    # If the result contains an error, rerun the task
+                    if "error" in existing_result:
+                        logging.info(f"Rerunning {id}: previous result contains error")
+                    else:
+                        logging.info(f"Skipping {id}: result file already exists")
+                        return existing_result
+                except Exception as e:
+                    logging.warning(f"Failed to load existing result for {id}: {e}")
+                    logging.warning("Continuing with execution")
+
         async with sem:
             config = {
                 "recursion_limit": self.recursion_limit,
