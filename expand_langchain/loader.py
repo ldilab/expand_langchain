@@ -73,6 +73,7 @@ class HuggingFaceSourceLoader(SourceLoader):
 
 class LocalSourceLoader(SourceLoader):
     format: str = "json"  # json, jsonl, csv, parquet, arrow, yaml
+    transform: Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None
 
     def run(self):
         """Load dataset from local file"""
@@ -141,6 +142,12 @@ class LocalSourceLoader(SourceLoader):
                 data_list.sort(key=lambda x: x.get(self.sort_key, 0))
             except Exception as e:
                 logger.warning(f"Failed to sort by '{self.sort_key}': {e}")
+
+            # Apply transform function if provided
+            if self.transform is not None:
+                original_count = len(data_list)
+                data_list = self.transform(data_list)
+                logger.info(f"Transform applied: {original_count} -> {len(data_list)} examples")
 
             self.data = cast(List[Dict[str, Any]], data_list)
             logger.info(f"Loaded {len(data_list)} examples from {self.path}")
