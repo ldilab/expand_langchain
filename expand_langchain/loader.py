@@ -147,7 +147,9 @@ class LocalSourceLoader(SourceLoader):
             if self.transform is not None:
                 original_count = len(data_list)
                 data_list = self.transform(data_list)
-                logger.info(f"Transform applied: {original_count} -> {len(data_list)} examples")
+                logger.info(
+                    f"Transform applied: {original_count} -> {len(data_list)} examples"
+                )
 
             self.data = cast(List[Dict[str, Any]], data_list)
             logger.info(f"Loaded {len(data_list)} examples from {self.path}")
