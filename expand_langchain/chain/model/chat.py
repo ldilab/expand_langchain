@@ -1,13 +1,9 @@
 import logging
-import os
 from typing import Any, List, Optional
 
 from langchain.callbacks.manager import CallbackManagerForLLMRun
 from langchain.schema import BaseMessage, ChatResult
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_ollama import ChatOllama
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
-from pydantic import SecretStr
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -15,7 +11,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from .custom_api.snowflake import ChatSnowflakeCortex
+from ...providers import LLMProviderError, LLMProviderFactory
 
 
 class GeneralChatModel(BaseChatModel):
@@ -36,83 +32,21 @@ class GeneralChatModel(BaseChatModel):
 
     @property
     def llm(self):
-        if self.platform == "azure":
-            return AzureChatOpenAI(
-                azure_endpoint=os.environ["AZURE_ENDPOINT"],
-                api_version=os.environ["AZURE_API_VERSION"],
-                api_key=SecretStr(os.environ["AZURE_API_KEY"]),
-                azure_deployment=self.model,
+        """Get the LLM instance using the factory pattern."""
+        try:
+            return LLMProviderFactory.create_chat_model(
+                platform=self.platform,
+                model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
-                model_kwargs={"top_p": self.top_p},
-                max_retries=self.max_retries,
-            )
-        elif self.platform == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            return ChatOpenAI(
-                api_key=SecretStr(api_key) if api_key else None,
-                model=self.model,
-                max_completion_tokens=self.max_tokens,
-                temperature=self.temperature,
                 top_p=self.top_p,
+                num_ctx=self.num_ctx,
                 max_retries=self.max_retries,
-                base_url=os.environ.get("OPENAI_API_BASE", None),
+                base_url=self.base_url,
                 extra_body=self.extra_body,
             )
-
-        elif self.platform == "open_webui":
-            return ChatOllama(
-                model=self.model,
-                num_predict=self.max_tokens,
-                num_ctx=self.num_ctx,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                base_url=os.environ["OPEN_WEBUI_BASE_URL"],
-                headers={
-                    "Authorization": f"Bearer {os.environ['OPEN_WEBUI_API_KEY']}",
-                    "Content-Type": "application/json",
-                },
-            )
-
-        elif self.platform == "ollama":
-            return ChatOllama(
-                model=self.model,
-                num_predict=self.max_tokens,
-                num_ctx=self.num_ctx,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                base_url=self.base_url or os.environ["OLLAMA_BASE_URL"],
-            )
-
-        elif self.platform == "vllm":
-            return ChatOpenAI(
-                openai_api_key=os.environ.get("VLLM_API_KEY"),
-                openai_api_base=os.environ["VLLM_BASE_URL"],
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                max_retries=self.max_retries,
-            )
-
-        elif self.platform == "snowflake":
-            return ChatSnowflakeCortex(
-                model=self.model,
-                cortex_function="complete",
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                top_p=self.top_p,
-                account=os.environ.get("SNOWFLAKE_ACCOUNT"),
-                username=os.environ.get("SNOWFLAKE_USERNAME"),
-                password=os.environ.get("SNOWFLAKE_PASSWORD"),
-                database=os.environ.get("SNOWFLAKE_DATABASE"),
-                schema=os.environ.get("SNOWFLAKE_SCHEMA"),
-                role=os.environ.get("SNOWFLAKE_ROLE"),
-                warehouse=os.environ.get("SNOWFLAKE_WAREHOUSE"),
-            )
-
-        else:
-            raise ValueError(f"platform {self.platform} not supported")
+        except LLMProviderError as e:
+            raise ValueError(f"Failed to create {self.platform} chat model: {e}") from e
 
     def _generate(
         self,

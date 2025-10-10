@@ -14,6 +14,7 @@ from langgraph.store.memory import InMemoryStore
 from pydantic import BaseModel
 from tqdm.asyncio import tqdm_asyncio
 
+from .config import EnvironmentConfig
 from .config_registry import get_config
 from .dataset_registry import get_dataset
 from .graph import CustomStateGraph
@@ -79,12 +80,12 @@ class Generator(BaseModel):
             self.cache_root = self.result_root
 
     def _load_api_keys(self):
-        if self.api_keys_path and Path(self.api_keys_path).exists():
-            api_keys = json.loads(Path(self.api_keys_path).read_text())
-            for k, v in api_keys.items():
-                if not os.environ.get(k, None):
-                    logging.warning(f"Set {k} from api_keys file")
-                    os.environ[k] = v
+        """Load API keys using the centralized environment config."""
+        env_config = EnvironmentConfig(validate_on_init=False)
+        try:
+            env_config.set_from_api_keys_file(self.api_keys_path)
+        except Exception as e:
+            logging.warning(f"Failed to load API keys from {self.api_keys_path}: {e}")
 
     def run(
         self,
@@ -431,20 +432,28 @@ class Generator(BaseModel):
         msg: str = "Done",
     ):
         """
-        Send message to the webhook
+        Send message to the webhook using EnvironmentConfig
         """
-        webhook = os.environ.get("LARK_WEBHOOK", None)
+        env_config = EnvironmentConfig(validate_on_init=False)
+        webhook = env_config.lark_webhook
+
         if webhook is None:
+            logging.debug("LARK_WEBHOOK not configured, skipping notification")
             return self
 
-        import requests
+        try:
+            import requests
 
-        msg = f"{self.run_name}: {msg}"
+            msg = f"{self.run_name}: {msg}"
 
-        requests.post(
-            webhook,
-            json={"msg_type": "text", "content": {"text": msg}},
-        )
+            requests.post(
+                webhook,
+                json={"msg_type": "text", "content": {"text": msg}},
+            )
+            logging.info(f"Sent Lark notification: {msg}")
+
+        except Exception as e:
+            logging.warning(f"Failed to send Lark notification: {e}")
 
         return self
 

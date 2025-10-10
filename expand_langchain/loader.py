@@ -12,6 +12,14 @@ from pydantic import Field as PydanticField
 from pydantic import field_validator, model_validator
 from tqdm import tqdm
 
+from .dataset_components import (
+    CacheManager,
+    DatasetValidator,
+    DatasetWriter,
+    FieldExtractor,
+    LookupTableBuilder,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -275,25 +283,43 @@ class MultiSourceDatasetMerger(BaseModel):
     @model_validator(mode="after")
     def validate_field_sources(self):
         """필드의 소스가 실제 소스에 존재하는지 검증"""
-        source_names = set(self.sources.keys())
-
-        for field_name, field_config in self.fields.items():
-            if field_config.source not in source_names:
-                raise ValueError(
-                    f"Field '{field_name}' references unknown source '{field_config.source}'. "
-                    f"Available sources: {list(source_names)}"
-                )
-
+        DatasetValidator.validate_field_sources(self.fields, self.sources)
         return self
+
+    def _get_config_dict(self) -> Dict[str, Any]:
+        """Get configuration as dictionary for hashing."""
+        return {
+            "sources": {
+                name: {
+                    "path": loader.path,
+                    "format": getattr(loader, "format", "unknown"),
+                }
+                for name, loader in self.sources.items()
+            },
+            "primary_key": self.primary_key,
+            "fields": {name: str(field) for name, field in self.fields.items()},
+            "max_samples": self.max_samples,
+        }
 
     def run(self):
         """
         여러 소스의 데이터셋을 사용자 정의 필드로 재구축하는 메인 메서드
+        리팩토링된 컴포넌트들을 사용하여 더 깔끔하고 유지보수 가능한 코드
         """
         logger.info("Starting dataset reconstruction...")
 
+        # Initialize components
+        cache_manager = CacheManager()
+        lookup_builder = LookupTableBuilder()
+        field_extractor = FieldExtractor(lookup_builder)
+
         # Setup cache directory
-        self._setup_cache_directory()
+        config_hash = cache_manager.generate_config_hash(self._get_config_dict())
+        cache_manager.setup_cache_directory(config_hash)
+
+        # Store cache manager for later use
+        self.data_cache_dir = cache_manager.cache_dir
+        self.data_file_path = cache_manager.get_cache_path()
 
         # 1. Load all source datasets
         logger.info("Loading source datasets...")
@@ -307,16 +333,25 @@ class MultiSourceDatasetMerger(BaseModel):
 
         # 2. Build lookup tables for fast access
         logger.info("Building lookup tables...")
-        self._buildlookup_tables()
+        lookup_builder.build_lookup_tables(self.sources, self.primary_key)
 
         # 3. Find common primary keys across all sources
         logger.info("Finding common primary keys...")
-        primary_keys = self._find_common_primary_keys()
+        primary_keys = lookup_builder.find_common_primary_keys()
         logger.info(f"Found {len(primary_keys)} common primary keys")
 
         # 4. Build reconstructed dataset and save to disk
         logger.info("Reconstructing dataset with custom fields...")
-        self._build_and_save_dataset(primary_keys)
+        self.total_samples = DatasetWriter.write_dataset(
+            cache_manager=cache_manager,
+            primary_keys=primary_keys,
+            field_extractor=field_extractor,
+            primary_key=self.primary_key,
+            fields=self.fields,
+            sources=self.sources,
+            filter_func=self.filter_func,
+            max_samples=self.max_samples,
+        )
 
         logger.info(
             f"Dataset reconstruction complete. Final dataset has {self.total_samples} samples"
