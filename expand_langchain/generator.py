@@ -319,7 +319,6 @@ class Generator(BaseModel):
                 result = await self.root_node.ainvoke(  # type: ignore
                     target,
                     config=config,  # type: ignore
-                    priority=priority,
                 )
 
                 logging.info(f"Done: {id}")

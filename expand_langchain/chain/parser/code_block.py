@@ -36,9 +36,7 @@ class CodeBlockOutputParser(BaseOutputParser[str]):
             code_content = matches[-1].strip()
             return code_content
         else:
-            raise OutputParserException(
-                f"Could not parse code block from text: {text[:100]}..."
-            )
+            return text
 
     @property
     def _type(self) -> str:
