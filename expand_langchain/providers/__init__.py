@@ -54,6 +54,9 @@ class OpenAIProvider(BaseLLMProvider):
         api_key = os.environ.get("OPENAI_API_KEY", "")
         base_url = kwargs.get("base_url") or os.environ.get("OPENAI_API_BASE")
 
+        # Set a reasonable default timeout to prevent hanging on large payloads
+        timeout = kwargs.get("timeout", 120)
+        
         return ChatOpenAI(
             api_key=SecretStr(api_key) if api_key else None,
             model=kwargs.get("model", "gpt-3.5-turbo"),
@@ -63,6 +66,7 @@ class OpenAIProvider(BaseLLMProvider):
             max_retries=kwargs.get("max_retries", 10),
             base_url=base_url,
             extra_body=kwargs.get("extra_body"),
+            timeout=timeout,
         )
 
     def create_embedding_model(self, **kwargs) -> Embeddings:

@@ -1,10 +1,9 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Union
 
-from langchain.prompts import AIMessagePromptTemplate as AIMPT
 from langchain.prompts import ChatPromptTemplate
 from langchain.prompts import HumanMessagePromptTemplate as HMPT
 from langchain.prompts import SystemMessagePromptTemplate as SMPT
-from langchain.prompts.few_shot import FewShotChatMessagePromptTemplate
+from langchain_core.messages import SystemMessage
 from langchain_core.prompts import MessagesPlaceholder
 
 
@@ -67,9 +66,39 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
         self.chat_history_len = chat_history_len
 
     def invoke(self, input, config=None, **kwargs):
-        if self.chat_history_len > 0:
-            input[self.chat_history_key] = input.get(self.chat_history_key, [])[
-                -self.chat_history_len :
-            ]
+        """
+        Invoke the prompt template with automatic chat history truncation.
+
+        Truncates chat history to the most recent N messages based on chat_history_len.
+        System messages are excluded from truncation and always preserved.
+        This prevents the conversation context from growing unbounded.
+
+        Args:
+            input: Input dictionary containing prompt variables
+            config: Optional runtime configuration
+            **kwargs: Additional keyword arguments
+
+        Returns:
+            Formatted prompt with truncated chat history
+        """
+        if self.chat_history_len > 0 and self.chat_history_key in input:
+            chat_history = input.get(self.chat_history_key, [])
+
+            # Separate system messages from other messages
+
+            system_messages = []
+            non_system_messages = []
+
+            for msg in chat_history:
+                if isinstance(msg, SystemMessage):
+                    system_messages.append(msg)
+                else:
+                    non_system_messages.append(msg)
+
+            # Keep only the most recent non-system messages
+            truncated_non_system = non_system_messages[-self.chat_history_len :]
+
+            # Combine: system messages first, then truncated chat history
+            input[self.chat_history_key] = system_messages + truncated_non_system
 
         return super().invoke(input, config, **kwargs)
