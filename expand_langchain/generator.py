@@ -70,8 +70,8 @@ class Generator(BaseModel):
     def _init_result_dir(self):
         if not self.run_name:
             # Generate run_name with config_name + current datetime
-            current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
-            self.run_name = f"{self.config_name}-{current_time}"
+            current_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.run_name = f"{current_time}-{self.config_name}"
 
         # Append -debug suffix if debug mode is enabled
         if self.debug and not self.run_name.endswith("-debug"):
