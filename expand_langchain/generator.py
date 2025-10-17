@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from traceback import format_exc
 from typing import Optional, cast
@@ -68,7 +69,14 @@ class Generator(BaseModel):
 
     def _init_result_dir(self):
         if not self.run_name:
-            self.run_name = self.config_name
+            # Generate run_name with config_name + current datetime
+            current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+            self.run_name = f"{self.config_name}-{current_time}"
+
+        # Append -debug suffix if debug mode is enabled
+        if self.debug and not self.run_name.endswith("-debug"):
+            self.run_name = f"{self.run_name}-debug"
+
         if self.save_on:
             self.output_dir = Path(f"results/{self.run_name}")
             self.result_root = self.output_dir / "results"
