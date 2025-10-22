@@ -149,6 +149,7 @@ class GeneralChatModel(BaseChatModel):
     stop: Optional[List[str]] = None
     base_url: Optional[str] = None
     extra_body: Optional[dict] = None
+    timeout: Optional[float] = None  # Timeout in seconds
 
     @property
     def _llm_type(self) -> str:
@@ -168,6 +169,7 @@ class GeneralChatModel(BaseChatModel):
                 max_retries=self.max_retries,
                 base_url=self.base_url,
                 extra_body=self.extra_body,
+                timeout=self.timeout,
             )
         except LLMProviderError as e:
             raise ValueError(f"Failed to create {self.platform} chat model: {e}") from e
@@ -280,6 +282,32 @@ class GeneralChatModel(BaseChatModel):
                     raise e
             except Exception as e:
                 error_msg = str(e).lower()
+
+                # Check for rate limit errors (429) - handle with infinite retries
+                if any(
+                    phrase in error_msg
+                    for phrase in [
+                        "429",
+                        "rate limit",
+                        "too many requests",
+                        "quota exceeded",
+                    ]
+                ):
+                    import time
+
+                    wait_time = min(
+                        60, 2**attempt_count
+                    )  # Exponential backoff, max 60s
+                    logging.warning(
+                        f"Rate limit error detected (429). "
+                        f"Retry attempt {attempt_count}. "
+                        f"Waiting {wait_time}s before retrying..."
+                    )
+                    time.sleep(wait_time)
+                    # Don't raise - let tenacity retry infinitely for rate limits
+                    # by resetting the attempt counter
+                    attempt_count = 0
+                    raise e
 
                 # Check for payload too large errors
                 if any(

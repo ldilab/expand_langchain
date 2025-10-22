@@ -56,7 +56,7 @@ class OpenAIProvider(BaseLLMProvider):
 
         # Set a reasonable default timeout to prevent hanging on large payloads
         timeout = kwargs.get("timeout", 120)
-        
+
         return ChatOpenAI(
             api_key=SecretStr(api_key) if api_key else None,
             model=kwargs.get("model", "gpt-3.5-turbo"),
@@ -98,6 +98,9 @@ class AzureProvider(BaseLLMProvider):
 
         self.validate_config()
 
+        # Set timeout if provided
+        timeout = kwargs.get("timeout", 120)
+
         return AzureChatOpenAI(
             azure_endpoint=os.environ["AZURE_ENDPOINT"],
             api_version=os.environ["AZURE_API_VERSION"],
@@ -107,6 +110,7 @@ class AzureProvider(BaseLLMProvider):
             temperature=kwargs.get("temperature", 0.7),
             model_kwargs={"top_p": kwargs.get("top_p", 1.0)},
             max_retries=kwargs.get("max_retries", 10),
+            timeout=timeout,
         )
 
     def create_embedding_model(self, **kwargs) -> Embeddings:
@@ -209,6 +213,9 @@ class VLLMProvider(BaseLLMProvider):
 
         self.validate_config()
 
+        # Set timeout if provided
+        timeout = kwargs.get("timeout", 120)
+
         return ChatOpenAI(
             openai_api_key=os.environ.get("VLLM_API_KEY", "dummy-key"),
             openai_api_base=os.environ["VLLM_BASE_URL"],
@@ -217,6 +224,7 @@ class VLLMProvider(BaseLLMProvider):
             temperature=kwargs.get("temperature", 0.7),
             top_p=kwargs.get("top_p", 1.0),
             max_retries=kwargs.get("max_retries", 10),
+            timeout=timeout,
         )
 
     def create_embedding_model(self, **kwargs) -> Embeddings:
@@ -291,7 +299,7 @@ class LLMProviderFactory:
 
         Args:
             platform: Platform name (openai, azure, ollama, etc.)
-            **kwargs: Model configuration parameters
+            **kwargs: Model configuration parameters (including timeout)
 
         Returns:
             Configured chat model instance
@@ -304,6 +312,24 @@ class LLMProviderFactory:
             raise LLMProviderError(
                 f"Unsupported platform: {platform}. Available: {available}"
             )
+
+        # Handle timeout parameter with platform-specific warnings
+        timeout = kwargs.get("timeout")
+        if timeout is not None:
+            import logging
+
+            timeout_supported_platforms = ["openai", "azure", "vllm"]
+
+            if platform in timeout_supported_platforms:
+                logging.info(f"Timeout set to {timeout}s for {platform} platform")
+            else:
+                logging.warning(
+                    f"Timeout parameter is not directly supported for {platform} platform. "
+                    f"Timeout setting will be ignored. "
+                    f"Supported platforms: {', '.join(timeout_supported_platforms)}"
+                )
+                # Remove timeout from kwargs for unsupported platforms
+                kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
 
         provider = cls._providers[platform]()
         return provider.create_chat_model(**kwargs)
