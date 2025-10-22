@@ -192,6 +192,35 @@ class GeneralChatModel(BaseChatModel):
         attempt_count = 0
         current_messages = messages
 
+        # Preemptive truncation to prevent automatic context window truncation
+        # This applies to any platform when num_ctx is specified
+        if self.num_ctx:
+            # Calculate approximate token count (rough estimate: 1 token ≈ 4 characters)
+            total_chars = sum(len(str(msg.content)) for msg in current_messages)
+            approximate_tokens = total_chars // 4
+
+            # If we're close to or exceeding the context window, preemptively truncate
+            # Use 80% of context window as safety margin (reserve space for output)
+            max_input_tokens = int(self.num_ctx * 0.8)
+
+            if approximate_tokens > max_input_tokens:
+                max_chars = max_input_tokens * 4  # Convert back to characters
+                logging.warning(
+                    f"Context window prevention: {approximate_tokens} tokens exceeds "
+                    f"{max_input_tokens} tokens limit (80% of {self.num_ctx}). "
+                    f"Preemptively truncating to {max_chars} chars..."
+                )
+                current_messages = truncate_messages(
+                    current_messages, max_chars=max_chars
+                )
+
+                # Log the truncation result
+                new_total_chars = sum(len(str(msg.content)) for msg in current_messages)
+                new_approximate_tokens = new_total_chars // 4
+                logging.info(
+                    f"After truncation: {new_approximate_tokens} tokens ({new_total_chars} chars)"
+                )
+
         # Create a retry decorator with exponential backoff
         retry_decorator = retry(
             stop=stop_after_attempt(self.max_retries),
