@@ -38,7 +38,7 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
         if not messages:
             messages.append(SMPT.from_template("", template_format="jinja2"))
 
-        if chat_history_key and chat_history_len > 0:
+        if chat_history_key and chat_history_len != 0:
             messages.append(
                 MessagesPlaceholder(variable_name=chat_history_key),
             )
@@ -73,6 +73,11 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
         System messages are excluded from truncation and always preserved.
         This prevents the conversation context from growing unbounded.
 
+        Chat history truncation behavior:
+        - chat_history_len > 0: Keep only the most recent N non-system messages
+        - chat_history_len == 0: Chat history disabled (no MessagesPlaceholder added)
+        - chat_history_len < 0: No truncation, keep all messages
+
         Args:
             input: Input dictionary containing prompt variables
             config: Optional runtime configuration
@@ -81,24 +86,26 @@ class CustomChatPromptTemplate(ChatPromptTemplate):
         Returns:
             Formatted prompt with truncated chat history
         """
-        if self.chat_history_len > 0 and self.chat_history_key in input:
-            chat_history = input.get(self.chat_history_key, [])
+        if self.chat_history_key in input:
+            if self.chat_history_len > 0:
+                # Truncate to most recent N messages
+                chat_history = input.get(self.chat_history_key, [])
 
-            # Separate system messages from other messages
+                # Separate system messages from other messages
+                system_messages = []
+                non_system_messages = []
 
-            system_messages = []
-            non_system_messages = []
+                for msg in chat_history:
+                    if isinstance(msg, SystemMessage):
+                        system_messages.append(msg)
+                    else:
+                        non_system_messages.append(msg)
 
-            for msg in chat_history:
-                if isinstance(msg, SystemMessage):
-                    system_messages.append(msg)
-                else:
-                    non_system_messages.append(msg)
+                # Keep only the most recent non-system messages
+                truncated_non_system = non_system_messages[-self.chat_history_len :]
 
-            # Keep only the most recent non-system messages
-            truncated_non_system = non_system_messages[-self.chat_history_len :]
-
-            # Combine: system messages first, then truncated chat history
-            input[self.chat_history_key] = system_messages + truncated_non_system
+                # Combine: system messages first, then truncated chat history
+                input[self.chat_history_key] = system_messages + truncated_non_system
+            # else: chat_history_len <= 0 means keep all messages, no truncation needed
 
         return super().invoke(input, config, **kwargs)
