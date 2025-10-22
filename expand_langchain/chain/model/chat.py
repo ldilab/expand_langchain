@@ -2,6 +2,7 @@ import logging
 from typing import Any, List, Optional
 
 from langchain.callbacks.manager import CallbackManagerForLLMRun
+from langchain.chat_models import init_chat_model
 from langchain.schema import BaseMessage, ChatResult
 from langchain_core.language_models.chat_models import BaseChatModel
 from tenacity import (
@@ -10,8 +11,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
-from ...providers import LLMProviderError, LLMProviderFactory
 
 
 def truncate_messages(
@@ -139,6 +138,15 @@ def truncate_messages(
 
 
 class GeneralChatModel(BaseChatModel):
+    """
+    A unified chat model wrapper that supports multiple LLM providers.
+
+    Uses LangChain's init_chat_model for standard providers (OpenAI, Azure, Ollama, Anthropic)
+    and falls back to custom LLMProviderFactory for specialized providers (vLLM, Snowflake, Open WebUI).
+
+    This provides automatic payload error handling, retry logic, and message truncation.
+    """
+
     model: str
     max_tokens: int
     temperature: float
@@ -157,21 +165,61 @@ class GeneralChatModel(BaseChatModel):
 
     @property
     def llm(self):
-        """Get the LLM instance using the factory pattern."""
+        """Get the LLM instance using init_chat_model where applicable."""
         try:
-            return LLMProviderFactory.create_chat_model(
-                platform=self.platform,
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                top_p=self.top_p,
-                num_ctx=self.num_ctx,
-                max_retries=self.max_retries,
-                base_url=self.base_url,
-                extra_body=self.extra_body,
-                timeout=self.timeout,
-            )
-        except LLMProviderError as e:
+            # Map platform names to init_chat_model format (provider:model or just model)
+            platform_map = {
+                "openai": "openai",
+                "azure": "azure_openai",
+                "ollama": "ollama",
+                "anthropic": "anthropic",
+            }
+
+            # For platforms supported by init_chat_model, use it for standardization
+            if self.platform in platform_map:
+                model_string = f"{platform_map[self.platform]}:{self.model}"
+
+                # Build kwargs - init_chat_model passes through provider-specific params
+                kwargs = {
+                    "temperature": self.temperature,
+                    "max_tokens": self.max_tokens,
+                    "max_retries": self.max_retries,
+                    "top_p": self.top_p,
+                }
+
+                # Add optional parameters
+                if self.timeout is not None:
+                    kwargs["timeout"] = self.timeout
+                if self.base_url is not None:
+                    kwargs["base_url"] = self.base_url
+                if self.stop is not None:
+                    kwargs["stop"] = self.stop
+                if self.extra_body is not None:
+                    kwargs["extra_body"] = self.extra_body
+
+                # Platform-specific parameters
+                if self.platform == "ollama" and self.num_ctx is not None:
+                    kwargs["num_ctx"] = self.num_ctx
+
+                return init_chat_model(model_string, **kwargs)
+            else:
+                # For custom platforms (vllm, snowflake, open_webui), fall back to custom factory
+                # These require special handling not supported by init_chat_model
+                from ...providers import LLMProviderFactory
+
+                return LLMProviderFactory.create_chat_model(
+                    platform=self.platform,
+                    model=self.model,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    num_ctx=self.num_ctx,
+                    max_retries=self.max_retries,
+                    base_url=self.base_url,
+                    extra_body=self.extra_body,
+                    timeout=self.timeout,
+                )
+        except Exception as e:
             raise ValueError(f"Failed to create {self.platform} chat model: {e}") from e
 
     def _generate(
