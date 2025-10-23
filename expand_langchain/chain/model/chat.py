@@ -1,10 +1,22 @@
 import logging
-from typing import Any, List, Optional
+from operator import itemgetter
+from typing import Any, List, Literal, Optional, Type, Union, cast
 
-from langchain.callbacks.manager import CallbackManagerForLLMRun
 from langchain.chat_models import init_chat_model
-from langchain.schema import BaseMessage, ChatResult
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
+from langchain_core.outputs import ChatResult
+from langchain_core.runnables import (
+    Runnable,
+    RunnableLambda,
+    RunnableMap,
+    RunnablePassthrough,
+)
+from langchain_core.utils.pydantic import is_basemodel_subclass
+from pydantic import BaseModel
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -418,3 +430,149 @@ class GeneralChatModel(BaseChatModel):
                 raise e
 
         return _generate_with_retry()
+
+    def with_structured_output(
+        self,
+        schema: Union[Type[BaseModel], dict, None] = None,
+        *,
+        method: Literal["json_mode"] = "json_mode",
+        include_raw: bool = False,
+        **kwargs: Any,
+    ) -> Runnable[LanguageModelInput, Union[dict, BaseModel]]:
+        """Model wrapper that returns outputs formatted to match the given schema.
+
+        This implementation adds format instructions to the system message,
+        making it compatible with non-OpenAI models that don't support response_format.
+
+        Args:
+            schema: The output schema. Can be:
+                - A Pydantic BaseModel class
+                - A dictionary (JSON schema)
+                - None (returns raw JSON)
+
+                If schema is a Pydantic class, the output will be a Pydantic instance.
+                Otherwise, output will be a dict.
+
+            method: Currently only supports "json_mode". This will:
+                - Add format instructions to the system message
+                - Use PydanticOutputParser or JsonOutputParser to parse the output
+
+            include_raw: If False, only the parsed output is returned.
+                If True, returns a dict with keys:
+                - 'raw': BaseMessage
+                - 'parsed': Parsed output (or None if parsing error)
+                - 'parsing_error': Exception or None
+
+            **kwargs: Additional arguments passed to the model.
+
+        Returns:
+            A Runnable that takes same inputs as BaseChatModel and outputs:
+            - If include_raw=False: Pydantic instance or dict
+            - If include_raw=True: dict with 'raw', 'parsed', 'parsing_error' keys
+
+        Example:
+            ```python
+            from pydantic import BaseModel, Field
+
+            class Answer(BaseModel):
+                answer: str
+                justification: str
+
+            llm = GeneralChatModel(model="gpt-4", platform="openai", ...)
+            structured_llm = llm.with_structured_output(Answer)
+            result = structured_llm.invoke("What is 2+2?")
+            # result is an Answer instance
+            ```
+        """
+        is_pydantic_schema = isinstance(schema, type) and is_basemodel_subclass(schema)
+
+        if method != "json_mode":
+            msg = (
+                f"Method '{method}' is not supported. "
+                f"GeneralChatModel currently only supports method='json_mode'."
+            )
+            raise ValueError(msg)
+
+        # Create appropriate output parser
+        if is_pydantic_schema:
+            output_parser: Runnable = PydanticOutputParser(
+                pydantic_object=cast(Type[BaseModel], schema)
+            )
+        elif schema is None:
+            output_parser = JsonOutputParser()
+        else:
+            # For dict/JSON schema, use JsonOutputParser
+            output_parser = JsonOutputParser()
+
+        # Get format instructions from the parser
+        format_instructions = output_parser.get_format_instructions()
+        format_instructions = f"""\
+# Output Format
+First, reason through the problem step-by-step in natural language.
+Explain your thinking process, analysis, and any intermediate steps needed to arrive at the final answer.
+After your reasoning, provide the final structured output wrapped in three backticks (```).
+Make sure to provide exactly ONE structured output in a SINGLE code block at the very end of your response.
+Do not include multiple code blocks or multiple structured outputs.
+The structured output must be the final element of your response.
+{format_instructions}
+"""
+
+        # Create a wrapper that adds format instructions to system message
+        def add_format_instructions_to_messages(
+            messages: Union[List[BaseMessage], LanguageModelInput],
+        ) -> List[BaseMessage]:
+            """Add format instructions after the system message."""
+            from langchain_core.messages import SystemMessage
+
+            # Convert input to messages if needed
+            if not isinstance(messages, list):
+                # Handle string or other input types
+                if isinstance(messages, str):
+                    messages = [SystemMessage(content=messages)]
+                elif hasattr(messages, "to_messages"):
+                    messages = messages.to_messages()  # type: ignore
+                else:
+                    # Try to convert using BaseMessage
+                    messages = [messages] if isinstance(messages, BaseMessage) else list(messages)  # type: ignore
+
+            if not messages:
+                return [SystemMessage(content=format_instructions)]
+
+            # Find the last system message
+            result_messages = []
+            system_message_found = False
+
+            for i, msg in enumerate(messages):
+                if isinstance(msg, SystemMessage) and not system_message_found:
+                    # Add format instructions to the first system message
+                    new_content = f"{msg.content}\n\n{format_instructions}"
+                    result_messages.append(SystemMessage(content=new_content))
+                    system_message_found = True
+                else:
+                    result_messages.append(msg)
+
+            # If no system message found, add one at the beginning
+            if not system_message_found:
+                result_messages.insert(0, SystemMessage(content=format_instructions))
+
+            return result_messages
+
+        # Create a runnable that preprocesses messages
+        preprocessor = RunnableLambda(add_format_instructions_to_messages)
+
+        # Chain: preprocess -> llm -> parse
+        llm_chain = preprocessor | self.llm
+
+        if include_raw:
+            # Return dict with raw, parsed, and parsing_error keys
+            parser_assign = RunnablePassthrough.assign(
+                parsed=itemgetter("raw") | output_parser, parsing_error=lambda _: None
+            )
+            parser_none = RunnablePassthrough.assign(parsed=lambda _: None)
+            parser_with_fallback = parser_assign.with_fallbacks(
+                [parser_none], exception_key="parsing_error"
+            )
+            return RunnableMap(raw=llm_chain) | parser_with_fallback
+        else:
+            # Return only parsed output
+            return llm_chain | output_parser

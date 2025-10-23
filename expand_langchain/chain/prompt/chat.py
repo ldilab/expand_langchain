@@ -1,10 +1,10 @@
 from typing import List, Optional, Union
 
-from langchain.prompts import ChatPromptTemplate
-from langchain.prompts import HumanMessagePromptTemplate as HMPT
-from langchain.prompts import SystemMessagePromptTemplate as SMPT
 from langchain_core.messages import SystemMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import HumanMessagePromptTemplate as HMPT
 from langchain_core.prompts import MessagesPlaceholder
+from langchain_core.prompts import SystemMessagePromptTemplate as SMPT
 
 
 class CustomChatPromptTemplate(ChatPromptTemplate):

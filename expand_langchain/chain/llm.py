@@ -1,6 +1,5 @@
 from typing import Any, Dict, Optional
 
-from langchain.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import BaseOutputParser, StrOutputParser
 from langchain_core.runnables import Runnable, RunnableSerializable
 from pydantic import Field, PrivateAttr
