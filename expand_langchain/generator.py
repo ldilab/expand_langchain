@@ -294,6 +294,7 @@ class Generator(BaseModel):
                 "recursion_limit": self.recursion_limit,
                 "callbacks": [],
                 "tags": [id],
+                "langfuse_tags": [self.run_name],
                 "metadata": {
                     "id": id,
                     "cache_root": self.cache_root,
