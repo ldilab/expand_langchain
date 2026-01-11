@@ -59,6 +59,27 @@ def _serialize_messages(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]
     return result
 
 
+def _name_from_serialized(serialized: Any, fallback: str = "unknown") -> str:
+    """Best-effort component name extraction.
+
+    LangChain sometimes passes `serialized=None` or different shapes depending on
+    the Runnable implementation.
+    """
+    if not isinstance(serialized, dict):
+        return fallback
+
+    name = serialized.get("name")
+    if isinstance(name, str) and name:
+        return name
+
+    ident = serialized.get("id")
+    if isinstance(ident, (list, tuple)) and ident:
+        last = ident[-1]
+        return str(last)
+
+    return fallback
+
+
 class LocalTraceCallback(BaseCallbackHandler):
     """Callback handler for local tracing.
 
@@ -191,7 +212,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             return
 
         self._record_start(run_id)
-        name = serialized.get("name", serialized.get("id", ["unknown"])[-1])
+        name = _name_from_serialized(serialized, fallback="llm")
 
         event = self._create_event(
             event_type=TraceEventType.LLM_START,
@@ -275,7 +296,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             return
 
         self._record_start(run_id)
-        name = serialized.get("name", serialized.get("id", ["unknown"])[-1])
+        name = _name_from_serialized(serialized, fallback="chat_model")
 
         # Serialize messages
         serialized_messages = [_serialize_messages(msgs) for msgs in messages]
@@ -306,7 +327,7 @@ class LocalTraceCallback(BaseCallbackHandler):
     ) -> None:
         """Handle chain start."""
         self._record_start(run_id)
-        name = serialized.get("name", serialized.get("id", ["unknown"])[-1])
+        name = _name_from_serialized(serialized, fallback="chain")
 
         # Check if this is a LangGraph node
         is_graph_node = metadata and metadata.get("langgraph_node")
@@ -392,7 +413,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             return
 
         self._record_start(run_id)
-        name = serialized.get("name", "unknown_tool")
+        name = _name_from_serialized(serialized, fallback="tool")
 
         event = self._create_event(
             event_type=TraceEventType.TOOL_START,
@@ -505,7 +526,7 @@ class LocalTraceCallback(BaseCallbackHandler):
     ) -> None:
         """Handle retriever start."""
         self._record_start(run_id)
-        name = serialized.get("name", serialized.get("id", ["unknown"])[-1])
+        name = _name_from_serialized(serialized, fallback="retriever")
 
         event = self._create_event(
             event_type=TraceEventType.RETRIEVER_START,
