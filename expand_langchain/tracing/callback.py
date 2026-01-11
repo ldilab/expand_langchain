@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 
-from langchain_core.callbacks.base import AsyncCallbackHandler, BaseCallbackHandler
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
@@ -59,7 +59,7 @@ def _serialize_messages(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]
     return result
 
 
-class LocalTraceCallback(BaseCallbackHandler, AsyncCallbackHandler):
+class LocalTraceCallback(BaseCallbackHandler):
     """Callback handler for local tracing.
 
     This handler captures LLM calls, tool executions, chain runs, and agent actions,
