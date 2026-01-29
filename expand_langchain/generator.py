@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 from traceback import format_exc
-from typing import Optional, cast
+from typing import Any, Optional, cast
 
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
@@ -41,31 +41,140 @@ class Generator(BaseModel):
 
     langfuse_on: bool = False
 
+    # Local tracing (file-based) - designed to be a lightweight alternative to Langfuse
+    tracing_on: bool = False
+    tracing_realtime: bool = True
+    tracing_log_llm_io: bool = True
+    tracing_log_tool_io: bool = True
+    tracing_log_graph_state: bool = True
+    tracing_max_content_length: int = 10000
+
     # private variables
     root_node: Optional[Runnable] = None
     output_dir: Optional[Path] = None
     result_root: Optional[Path] = None
     checkpoint_dir: Optional[Path] = None
 
+    # tracing internals
+    _trace_store: Any = None
+    _tracing_config: Any = None
+
     # pydantic config
     class Config:
         arbitrary_types_allowed = True
 
     def __init__(self, **data):
+        # Ensure boolean parameters are properly converted from Fire string inputs
+        # Fire may pass string values like "True"/"False" that need conversion
+        # Do this BEFORE calling super().__init__() for Pydantic v2 compatibility
+        for bool_field in [
+            "tracing_on",
+            "langfuse_on",
+            "save_on",
+            "rerun",
+            "debug",
+            "verbose",
+        ]:
+            if bool_field in data and isinstance(data[bool_field], str):
+                data[bool_field] = data[bool_field].lower() in ("true", "1", "yes")
+
+        # Now initialize Pydantic model with converted values
         super().__init__(**data)
 
-        if self.debug:
-            logging.basicConfig(level=logging.DEBUG)
-        elif self.verbose:
-            logging.basicConfig(level=logging.INFO)
+        # Initialize result directory FIRST so we have output_dir ready for logging
+        self._init_result_dir()
+
+        # Configure logging with file output AFTER result_dir is initialized
+        log_level = (
+            logging.DEBUG
+            if self.debug
+            else (logging.INFO if self.verbose else logging.WARNING)
+        )
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+        # Force configure root logger with file output
+        if self.save_on and self.output_dir:
+            log_file = str(self.output_dir / "generator.log")
+
+            # Remove existing handlers to avoid conflicts
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+
+            # Create file handler
+            file_handler = logging.FileHandler(log_file, mode="a")
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(logging.Formatter(log_format))
+            root_logger.addHandler(file_handler)
+
+            # Also add console handler for visibility
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(log_level)
+            console_handler.setFormatter(logging.Formatter(log_format))
+            root_logger.addHandler(console_handler)
+
+            root_logger.setLevel(log_level)
+        else:
+            logging.basicConfig(level=log_level, format=log_format)
 
         logging.getLogger("snowflake").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-        self._init_result_dir()
+        logging.info(
+            f"Generator init: tracing_on={self.tracing_on} (type: {type(self.tracing_on).__name__}), save_on={self.save_on}"
+        )
+
         self._load_api_keys()
+
+        if self.tracing_on:
+            self._init_tracing()
+
+    def _init_tracing(self):
+        logging.debug(
+            f"_init_tracing called: save_on={self.save_on}, run_name={self.run_name}, output_dir={self.output_dir}"
+        )
+
+        if not self.save_on or not self.output_dir or not self.run_name:
+            logging.warning(
+                f"Local tracing requested but conditions not met: "
+                f"save_on={self.save_on}, output_dir={self.output_dir}, run_name={self.run_name}; "
+                "tracing will be off"
+            )
+            self.tracing_on = False
+            return
+
+        try:
+            from .tracing import TraceStore, TracingConfig
+
+            self._tracing_config = TracingConfig(
+                run_name=self.run_name,
+                results_dir="results",
+                enable_realtime_log=self.tracing_realtime,
+                log_llm_io=self.tracing_log_llm_io,
+                log_tool_io=self.tracing_log_tool_io,
+                log_graph_state=self.tracing_log_graph_state,
+                max_content_length=self.tracing_max_content_length,
+                pretty_print=True,
+            )
+            self._trace_store = TraceStore(self._tracing_config)
+
+            if self.tracing_realtime:
+                print(
+                    f"TRACING: Realtime log at {self._tracing_config.realtime_log_path}"
+                )
+                print(
+                    f"TRACING: Use 'tail -f {self._tracing_config.realtime_log_path}' to monitor"
+                )
+            print(f"TRACING: Traces dir at {self._tracing_config.traces_dir}")
+
+        except Exception as e:
+            logging.warning(f"Failed to initialize local tracing: {e}")
+            logging.warning("Continuing without local tracing")
+            self.tracing_on = False
+            self._trace_store = None
+            self._tracing_config = None
 
     def _init_result_dir(self):
         if not self.run_name:
@@ -181,15 +290,27 @@ class Generator(BaseModel):
         tasks = []
         sem = asyncio.Semaphore(self.max_concurrency)
 
-        for i in range(len(dataset)):
-            target = dataset[i]
-            data_id = (
-                str(target.get(self.id_key, i)) if isinstance(target, dict) else str(i)
-            )
-            task = self._run_one(data_id, target, sem, priority=i)
-            tasks.append(task)
+        try:
+            for i in range(len(dataset)):
+                target = dataset[i]
+                data_id = (
+                    str(target.get(self.id_key, i))
+                    if isinstance(target, dict)
+                    else str(i)
+                )
+                task = self._run_one(data_id, target, sem, priority=i)
+                tasks.append(task)
 
-        await tqdm_asyncio.gather(*tasks)
+            await tqdm_asyncio.gather(*tasks)
+        finally:
+            # Best-effort finalize/close local tracing.
+            if self.tracing_on and self._trace_store:
+                try:
+                    for task_id in self._trace_store.list_sessions():
+                        self._trace_store.finalize_session(task_id)
+                    self._trace_store.close()
+                except Exception as e:
+                    logging.debug(f"Failed to finalize/close trace store: {e}")
 
     async def _check_and_log_checkpoint_loading(self, task_id: str, config: dict):
         """Check if checkpoint exists and log if loading from checkpoint"""
@@ -307,6 +428,23 @@ class Generator(BaseModel):
                 },
             }
 
+            local_trace_callback = None
+            if self.tracing_on and self._trace_store and self._tracing_config:
+                try:
+                    from .tracing import LocalTraceCallback
+
+                    local_trace_callback = LocalTraceCallback(
+                        config=self._tracing_config,
+                        store=self._trace_store,
+                    )
+                    local_trace_callback.set_task_id(id)
+                    config["callbacks"].append(local_trace_callback)
+                    logging.debug(
+                        f"[Generator] Attached LocalTraceCallback for task {id}"
+                    )
+                except Exception as e:
+                    logging.debug(f"Failed to attach local tracing callback: {e}")
+
             # Check if checkpoint exists and log if loading from checkpoint
             # Use the converted id (with _ instead of /)
             await self._check_and_log_checkpoint_loading(id, config)
@@ -339,6 +477,13 @@ class Generator(BaseModel):
 
                 if self.debug:
                     raise e
+
+            finally:
+                if local_trace_callback is not None:
+                    try:
+                        local_trace_callback.finalize(id)
+                    except Exception as e:
+                        logging.debug(f"Failed to finalize local trace for {id}: {e}")
 
             self._save_json(id, result)
 
