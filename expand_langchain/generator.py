@@ -64,28 +64,83 @@ class Generator(BaseModel):
         arbitrary_types_allowed = True
 
     def __init__(self, **data):
+        # Ensure boolean parameters are properly converted from Fire string inputs
+        # Fire may pass string values like "True"/"False" that need conversion
+        # Do this BEFORE calling super().__init__() for Pydantic v2 compatibility
+        for bool_field in [
+            "tracing_on",
+            "langfuse_on",
+            "save_on",
+            "rerun",
+            "debug",
+            "verbose",
+        ]:
+            if bool_field in data and isinstance(data[bool_field], str):
+                data[bool_field] = data[bool_field].lower() in ("true", "1", "yes")
+
+        # Now initialize Pydantic model with converted values
         super().__init__(**data)
 
-        if self.debug:
-            logging.basicConfig(level=logging.DEBUG)
-        elif self.verbose:
-            logging.basicConfig(level=logging.INFO)
+        # Initialize result directory FIRST so we have output_dir ready for logging
+        self._init_result_dir()
+
+        # Configure logging with file output AFTER result_dir is initialized
+        log_level = (
+            logging.DEBUG
+            if self.debug
+            else (logging.INFO if self.verbose else logging.WARNING)
+        )
+        log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+        # Force configure root logger with file output
+        if self.save_on and self.output_dir:
+            log_file = str(self.output_dir / "generator.log")
+
+            # Remove existing handlers to avoid conflicts
+            root_logger = logging.getLogger()
+            for handler in root_logger.handlers[:]:
+                root_logger.removeHandler(handler)
+
+            # Create file handler
+            file_handler = logging.FileHandler(log_file, mode="a")
+            file_handler.setLevel(log_level)
+            file_handler.setFormatter(logging.Formatter(log_format))
+            root_logger.addHandler(file_handler)
+
+            # Also add console handler for visibility
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(log_level)
+            console_handler.setFormatter(logging.Formatter(log_format))
+            root_logger.addHandler(console_handler)
+
+            root_logger.setLevel(log_level)
+        else:
+            logging.basicConfig(level=log_level, format=log_format)
 
         logging.getLogger("snowflake").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("urllib3").setLevel(logging.WARNING)
 
-        self._init_result_dir()
+        logging.info(
+            f"Generator init: tracing_on={self.tracing_on} (type: {type(self.tracing_on).__name__}), save_on={self.save_on}"
+        )
+
         self._load_api_keys()
 
         if self.tracing_on:
             self._init_tracing()
 
     def _init_tracing(self):
+        logging.debug(
+            f"_init_tracing called: save_on={self.save_on}, run_name={self.run_name}, output_dir={self.output_dir}"
+        )
+
         if not self.save_on or not self.output_dir or not self.run_name:
             logging.warning(
-                "Local tracing requested but save_on is disabled; tracing will be off"
+                f"Local tracing requested but conditions not met: "
+                f"save_on={self.save_on}, output_dir={self.output_dir}, run_name={self.run_name}; "
+                "tracing will be off"
             )
             self.tracing_on = False
             return
@@ -384,6 +439,9 @@ class Generator(BaseModel):
                     )
                     local_trace_callback.set_task_id(id)
                     config["callbacks"].append(local_trace_callback)
+                    logging.debug(
+                        f"[Generator] Attached LocalTraceCallback for task {id}"
+                    )
                 except Exception as e:
                     logging.debug(f"Failed to attach local tracing callback: {e}")
 

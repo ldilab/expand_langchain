@@ -81,8 +81,15 @@ class TraceStore:
 
             # Write to JSONL file (append mode)
             jsonl_path = self.config.traces_dir / f"{task_id}.jsonl"
-            with open(jsonl_path, "a", encoding="utf-8") as f:
-                f.write(event.to_json(pretty=False) + "\n")
+            logger.debug(
+                f"Writing trace event to {jsonl_path}: event_type={event.event_type}"
+            )
+            try:
+                with open(jsonl_path, "a", encoding="utf-8") as f:
+                    f.write(event.to_json(pretty=False) + "\n")
+                logger.debug(f"Successfully wrote trace to {jsonl_path}")
+            except Exception as e:
+                logger.error(f"Failed to write trace event to {jsonl_path}: {e}")
 
             # Write to realtime log if enabled
             if self._realtime_file and self.config.enable_realtime_log:

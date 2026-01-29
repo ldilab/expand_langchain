@@ -2,6 +2,11 @@ import logging
 from operator import itemgetter
 from typing import Any, List, Literal, Optional, Type, Union, cast
 
+try:
+    from openai import RateLimitError as OpenAIRateLimitError
+except ImportError:
+    OpenAIRateLimitError = None  # type: ignore
+
 from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.base import LanguageModelInput
@@ -19,10 +24,33 @@ from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import BaseModel
 from tenacity import (
     retry,
+    retry_if_exception,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
 )
+
+
+def is_rate_limit_error(exception: Exception) -> bool:
+    """Check if an exception is a rate limit error.
+
+    Handles both OpenAI RateLimitError and error messages containing rate limit indicators.
+    """
+    # Check OpenAI RateLimitError type
+    if OpenAIRateLimitError and isinstance(exception, OpenAIRateLimitError):
+        return True
+
+    # Check error message for rate limit indicators
+    error_msg = str(exception).lower()
+    rate_limit_indicators = [
+        "rate limit",
+        "ratelimit",
+        "429",
+        "too many requests",
+        "quota exceeded",
+        "no deployments available",
+    ]
+    return any(indicator in error_msg for indicator in rate_limit_indicators)
 
 
 def truncate_messages(
@@ -281,155 +309,160 @@ class GeneralChatModel(BaseChatModel):
                     f"After truncation: {new_approximate_tokens} tokens ({new_total_chars} chars)"
                 )
 
-        # Create a retry decorator with exponential backoff
-        retry_decorator = retry(
-            stop=stop_after_attempt(self.max_retries),
-            wait=wait_exponential(multiplier=1, min=1, max=60),
-            retry=retry_if_exception_type((ValueError, Exception)),
-            reraise=True,
-        )
-
-        @retry_decorator
-        def _generate_with_retry():
+        # Create a custom retry function that handles rate limits with infinite retry
+        def _generate_with_smart_retry():
             nonlocal attempt_count, current_messages
-            attempt_count += 1
+            rate_limit_attempt = 0
+            other_error_attempt = 0
 
-            try:
-                # Combine stop sequences properly
-                combined_stop = None
-                if stop is not None and self.stop is not None:
-                    combined_stop = stop + self.stop
-                elif stop is not None:
-                    combined_stop = stop
-                elif self.stop is not None:
-                    combined_stop = self.stop
+            while True:
+                try:
+                    attempt_count += 1
 
-                result = self.llm._generate(
-                    messages=current_messages,
-                    stop=combined_stop,
-                    run_manager=run_manager,
-                    **kwargs,
-                )
+                    # Combine stop sequences properly
+                    combined_stop = None
+                    if stop is not None and self.stop is not None:
+                        combined_stop = stop + self.stop
+                    elif stop is not None:
+                        combined_stop = stop
+                    elif self.stop is not None:
+                        combined_stop = self.stop
 
-                # Validate that the result contains meaningful content
-                if not result or not result.generations:
-                    raise ValueError("LLM returned empty result with no generations")
+                    result = self.llm._generate(
+                        messages=current_messages,
+                        stop=combined_stop,
+                        run_manager=run_manager,
+                        **kwargs,
+                    )
 
-                # Check finish_reason for each generation
-                for gen in result.generations:
-                    generation_info = getattr(gen, "generation_info", {})
-                    reason = generation_info.get(
-                        "finish_reason"
-                    ) or generation_info.get("done_reason")
+                    # Validate that the result contains meaningful content
+                    if not result or not result.generations:
+                        raise ValueError(
+                            "LLM returned empty result with no generations"
+                        )
 
-                    # Check if we have a valid reason
-                    if reason is not None:
-                        if reason != "stop":
+                    # Check finish_reason for each generation
+                    for gen in result.generations:
+                        generation_info = getattr(gen, "generation_info", {})
+                        reason = generation_info.get(
+                            "finish_reason"
+                        ) or generation_info.get("done_reason")
+
+                        # Check if we have a valid reason
+                        if reason is not None:
+                            if reason != "stop":
+                                logging.error(
+                                    f"LLM generation failed with reason: {reason}"
+                                )
+                                raise ValueError(
+                                    f"LLM generation failed with reason: {reason}"
+                                )
+                        else:
+                            # No finish/done reason found, check if we have generated content
+                            content = ""
+                            try:
+                                # Try to get content from message attribute first
+                                message = getattr(gen, "message", None)
+                                if message:
+                                    content = str(getattr(message, "content", ""))
+                                # If no message content, try text attribute
+                                if not content:
+                                    content = str(getattr(gen, "text", ""))
+                            except (AttributeError, TypeError):
+                                pass
+
+                            # If no content found, raise error
+                            if not content or not content.strip():
+                                logging.error(
+                                    "LLM generation has no finish/done reason and no content"
+                                )
+                                raise ValueError(
+                                    "LLM generation has no finish/done reason and no content"
+                                )
+
+                    return result
+
+                except Exception as e:
+                    error_msg = str(e).lower()
+
+                    # Check if this is a rate limit error
+                    if is_rate_limit_error(e):
+                        rate_limit_attempt += 1
+                        # Exponential backoff: 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, max 600 seconds
+                        wait_time = min(600, 2**rate_limit_attempt)
+                        logging.warning(
+                            f"Rate limit error detected. "
+                            f"Retry attempt {rate_limit_attempt} (infinite retry). "
+                            f"Waiting {wait_time}s before retrying..."
+                        )
+                        import time
+
+                        time.sleep(wait_time)
+                        continue  # Retry infinitely for rate limits
+
+                    # Handle other errors with limited retry
+                    other_error_attempt += 1
+
+                    # Content filter errors - don't retry
+                    if "content filter" in error_msg:
+                        logging.error(f"Content filter triggered: {e}")
+                        raise
+
+                    # Max tokens errors - don't retry
+                    if (
+                        "max tokens" in error_msg
+                        or "maximum context length" in error_msg
+                    ):
+                        logging.error(f"Max tokens exceeded: {e}")
+                        raise
+
+                    # Payload too large errors - try truncating
+                    if any(
+                        phrase in error_msg
+                        for phrase in [
+                            "payload too large",
+                            "request entity too large",
+                            "413",
+                            "context length exceeded",
+                            "request too large",
+                        ]
+                    ):
+                        if other_error_attempt <= 3:  # Try truncating up to 3 times
+                            # Progressive truncation: reduce by more each attempt
+                            max_chars = 50000 // other_error_attempt
+                            logging.warning(
+                                f"Payload too large error detected (attempt {other_error_attempt}). "
+                                f"Truncating messages to {max_chars} chars..."
+                            )
+                            current_messages = truncate_messages(
+                                current_messages, max_chars=max_chars
+                            )
+                            continue  # Retry with truncated messages
+                        else:
                             logging.error(
-                                f"LLM generation failed with reason: {reason}"
+                                f"Payload still too large after {other_error_attempt} truncation attempts"
                             )
-                            raise ValueError(
-                                f"LLM generation failed with reason: {reason}"
-                            )
-                    else:
-                        # No finish/done reason found, check if we have generated content
-                        content = ""
-                        try:
-                            # Try to get content from message attribute first
-                            message = getattr(gen, "message", None)
-                            if message:
-                                content = str(getattr(message, "content", ""))
-                            # If no message content, try text attribute
-                            if not content:
-                                content = str(getattr(gen, "text", ""))
-                        except (AttributeError, TypeError):
-                            pass
+                            raise
 
-                        # If no content found, raise error
-                        if not content or not content.strip():
-                            logging.error(
-                                "LLM generation has no finish/done reason and no content"
-                            )
-                            raise ValueError(
-                                "LLM generation has no finish/done reason and no content"
-                            )
+                    # Other errors - limited retry (max 10 attempts)
+                    if other_error_attempt >= 10:
+                        logging.error(
+                            f"Max retry attempts ({other_error_attempt}) reached for non-rate-limit error"
+                        )
+                        raise
 
-                return result
-            except ValueError as e:
-                error_msg = str(e).lower()
-                if "content filter" in error_msg:
-                    logging.error(f"Content filter triggered: {e}")
-                    raise e  # Don't retry content filter errors
-                elif "max tokens" in error_msg or "maximum context length" in error_msg:
-                    logging.error(f"Max tokens exceeded: {e}")
-                    raise e  # Don't retry max tokens errors
-                elif "out of memory" in error_msg:
-                    logging.warning(f"Out of memory error, will retry: {e}")
-                    raise e  # Let tenacity handle the retry
-                else:
-                    logging.warning(f"Unexpected ValueError, will retry: {e}")
-                    raise e
-            except Exception as e:
-                error_msg = str(e).lower()
-
-                # Check for rate limit errors (429) - handle with infinite retries
-                if any(
-                    phrase in error_msg
-                    for phrase in [
-                        "429",
-                        "rate limit",
-                        "too many requests",
-                        "quota exceeded",
-                    ]
-                ):
-                    import time
-
-                    wait_time = min(
-                        60, 2**attempt_count
-                    )  # Exponential backoff, max 60s
+                    # Exponential backoff for other errors
+                    wait_time = min(60, 2**other_error_attempt)
                     logging.warning(
-                        f"Rate limit error detected (429). "
-                        f"Retry attempt {attempt_count}. "
+                        f"Error encountered (attempt {other_error_attempt}/10): {e}. "
                         f"Waiting {wait_time}s before retrying..."
                     )
+                    import time
+
                     time.sleep(wait_time)
-                    # Don't raise - let tenacity retry infinitely for rate limits
-                    # by resetting the attempt counter
-                    attempt_count = 0
-                    raise e
+                    continue
 
-                # Check for payload too large errors
-                if any(
-                    phrase in error_msg
-                    for phrase in [
-                        "payload too large",
-                        "request entity too large",
-                        "413",
-                        "context length exceeded",
-                        "request too large",
-                    ]
-                ):
-                    if attempt_count <= 3:  # Try truncating up to 3 times
-                        # Progressive truncation: reduce by more each attempt
-                        max_chars = 50000 // attempt_count
-                        logging.warning(
-                            f"Payload too large error detected (attempt {attempt_count}). "
-                            f"Truncating messages to {max_chars} chars..."
-                        )
-                        current_messages = truncate_messages(
-                            current_messages, max_chars=max_chars
-                        )
-                        raise e  # Let tenacity retry with truncated messages
-                    else:
-                        logging.error(
-                            f"Payload too large even after {attempt_count} truncation attempts"
-                        )
-                        raise e
-
-                logging.warning(f"Unexpected error, will retry: {e}")
-                raise e
-
-        return _generate_with_retry()
+        return _generate_with_smart_retry()
 
     def with_structured_output(
         self,
@@ -560,8 +593,9 @@ The structured output must be the final element of your response.
         # Create a runnable that preprocesses messages
         preprocessor = RunnableLambda(add_format_instructions_to_messages)
 
-        # Chain: preprocess -> llm -> parse
-        llm_chain = preprocessor | self.llm
+        # Chain: preprocess -> GeneralChatModel (with retry logic) -> parse
+        # Use self (GeneralChatModel) instead of self.llm to preserve retry logic
+        llm_chain = preprocessor | self
 
         if include_raw:
             # Return dict with raw, parsed, and parsing_error keys

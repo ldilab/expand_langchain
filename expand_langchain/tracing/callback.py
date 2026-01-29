@@ -6,8 +6,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 
-from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage
 from langchain_core.outputs import ChatGenerationChunk, GenerationChunk, LLMResult
@@ -51,12 +51,75 @@ def _serialize_messages(messages: Sequence[BaseMessage]) -> List[Dict[str, Any]]
     """
     result = []
     for msg in messages:
-        result.append({
-            "type": msg.type,
-            "content": msg.content if isinstance(msg.content, str) else str(msg.content),
-            "additional_kwargs": getattr(msg, "additional_kwargs", {}),
-        })
+        result.append(
+            {
+                "type": msg.type,
+                "content": (
+                    msg.content if isinstance(msg.content, str) else str(msg.content)
+                ),
+                "additional_kwargs": getattr(msg, "additional_kwargs", {}),
+            }
+        )
     return result
+
+
+def _serialize_value(value: Any) -> Any:
+    """Safely serialize any value, including Pydantic models.
+
+    Args:
+        value: Value to serialize
+
+    Returns:
+        Serialized value safe for JSON
+    """
+    if value is None:
+        return None
+
+    # Check if it's a Pydantic model
+    if hasattr(value, "model_dump"):
+        try:
+            return value.model_dump()
+        except Exception as e:
+            logger.debug(f"Failed to use model_dump: {e}")
+            # Fallback to dict conversion
+            try:
+                return dict(value)
+            except Exception:
+                return str(value)
+
+    # Check for old Pydantic v1 style
+    if hasattr(value, "dict"):
+        try:
+            return value.dict()
+        except Exception as e:
+            logger.debug(f"Failed to use dict(): {e}")
+            return str(value)
+
+    # Handle dict
+    if isinstance(value, dict):
+        return {k: _serialize_value(v) for k, v in value.items()}
+
+    # Handle list/tuple
+    if isinstance(value, (list, tuple)):
+        return [_serialize_value(v) for v in value]
+
+    # Primitives
+    if isinstance(value, (str, int, float, bool)):
+        return value
+
+    # Try to convert to dict if it has __dict__
+    if hasattr(value, "__dict__"):
+        try:
+            return {
+                k: _serialize_value(v)
+                for k, v in value.__dict__.items()
+                if not k.startswith("_")
+            }
+        except Exception:
+            return str(value)
+
+    # Last resort
+    return str(value)
 
 
 def _name_from_serialized(serialized: Any, fallback: str = "unknown") -> str:
@@ -102,6 +165,10 @@ class LocalTraceCallback(BaseCallbackHandler):
         self.store = store or TraceStore(config)
         self._run_start_times: Dict[str, float] = {}
         self._current_task_id: Optional[str] = None
+        self._llm_call_counter: Dict[str, int] = {}  # Track LLM call count per task
+        self._pending_llm_calls: Dict[str, Dict[str, Any]] = (
+            {}
+        )  # Store start events by run_id
 
     def set_task_id(self, task_id: str):
         """Set the current task ID for tracing.
@@ -110,24 +177,90 @@ class LocalTraceCallback(BaseCallbackHandler):
             task_id: The task identifier
         """
         self._current_task_id = task_id
+        # Initialize LLM call counter for this task
+        if task_id not in self._llm_call_counter:
+            self._llm_call_counter[task_id] = 0
+        logger.debug(f"[LocalTraceCallback] set_task_id: {task_id}")
 
-    def _get_task_id(self, tags: Optional[List[str]] = None) -> str:
+    def _write_llm_io_text(
+        self,
+        task_id: str,
+        call_number: int,
+        messages: List[Dict],
+        response_text: str,
+        timestamp: str,
+    ):
+        """Write LLM I/O to human-readable text file.
+
+        Args:
+            task_id: Task identifier
+            call_number: Sequential call number
+            messages: Input messages
+            response_text: LLM response
+            timestamp: Timestamp string
+        """
+        if not self.config.log_llm_io:
+            return
+
+        try:
+            text_file = self.config.traces_dir / f"{task_id}_llm_io.txt"
+            with open(text_file, "a", encoding="utf-8") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"LLM Call #{call_number}\n")
+                f.write(f"Timestamp: {timestamp}\n")
+                f.write("=" * 80 + "\n\n")
+
+                # Write input messages
+                f.write("INPUT MESSAGES:\n")
+                f.write("-" * 80 + "\n")
+                for i, msg in enumerate(messages, 1):
+                    msg_type = msg.get("type", "unknown")
+                    msg_content = msg.get("content", "")
+                    f.write(f"\n[Message {i} - {msg_type.upper()}]\n")
+                    f.write(msg_content + "\n")
+
+                # Write output
+                f.write("\n" + "-" * 80 + "\n")
+                f.write("OUTPUT RESPONSE:\n")
+                f.write("-" * 80 + "\n")
+                f.write(response_text + "\n\n")
+
+        except Exception as e:
+            logger.debug(f"Failed to write LLM I/O text file: {e}")
+
+    def _get_task_id(
+        self,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Get the current task ID.
 
         Args:
             tags: Optional tags that may contain task ID
+            metadata: Optional metadata that may contain task ID
 
         Returns:
             The task ID
         """
-        # Try to get from tags first (LangGraph passes task_id as a tag)
+        # Priority 1: Explicitly set task ID (most reliable)
+        if self._current_task_id:
+            return self._current_task_id
+
+        # Priority 2: Metadata 'id' field (from config)
+        if metadata and isinstance(metadata, dict):
+            if "id" in metadata:
+                return str(metadata["id"])
+
+        # Priority 3: Tags (but skip internal tags like seq:, graph:, map:)
         if tags:
             for tag in tags:
-                if tag and not tag.startswith("seq:"):
+                if tag and not any(
+                    tag.startswith(prefix) for prefix in ["seq:", "graph:", "map:"]
+                ):
                     return str(tag)
 
-        # Fall back to explicitly set task ID
-        return self._current_task_id or "unknown"
+        # Fallback to unknown
+        return "unknown"
 
     def _create_event(
         self,
@@ -182,7 +315,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             error=error,
             duration_ms=duration_ms,
-            task_id=self._get_task_id(tags),
+            task_id=self._get_task_id(tags, metadata),
             tags=tags or [],
         )
 
@@ -210,6 +343,10 @@ class LocalTraceCallback(BaseCallbackHandler):
         """Handle LLM start."""
         if not self.config.log_llm_io:
             return
+
+        logger.debug(
+            f"[LocalTraceCallback] on_llm_start: task_id={self._current_task_id}, run_id={run_id}"
+        )
 
         self._record_start(run_id)
         name = _name_from_serialized(serialized, fallback="llm")
@@ -247,6 +384,30 @@ class LocalTraceCallback(BaseCallbackHandler):
         }
         if response.llm_output:
             outputs["llm_output"] = response.llm_output
+
+        # Write to human-readable text file if paired with chat_model_start
+        run_id_str = str(run_id)
+        if run_id_str in self._pending_llm_calls:
+            pending = self._pending_llm_calls.pop(run_id_str)
+            task_id = pending["task_id"]
+
+            # Increment call counter
+            self._llm_call_counter[task_id] = self._llm_call_counter.get(task_id, 0) + 1
+            call_number = self._llm_call_counter[task_id]
+
+            # Extract response text
+            response_text = ""
+            if response.generations and response.generations[0]:
+                response_text = response.generations[0][0].text
+
+            # Write to text file
+            self._write_llm_io_text(
+                task_id=task_id,
+                call_number=call_number,
+                messages=pending["messages"],
+                response_text=response_text,
+                timestamp=pending["timestamp"],
+            )
 
         event = self._create_event(
             event_type=TraceEventType.LLM_END,
@@ -301,6 +462,14 @@ class LocalTraceCallback(BaseCallbackHandler):
         # Serialize messages
         serialized_messages = [_serialize_messages(msgs) for msgs in messages]
 
+        # Store for pairing with llm_end
+        task_id = self._get_task_id(tags, metadata)
+        self._pending_llm_calls[str(run_id)] = {
+            "task_id": task_id,
+            "messages": serialized_messages[0] if serialized_messages else [],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+
         event = self._create_event(
             event_type=TraceEventType.CHAT_MODEL_START,
             run_id=run_id,
@@ -329,6 +498,13 @@ class LocalTraceCallback(BaseCallbackHandler):
         self._record_start(run_id)
         name = _name_from_serialized(serialized, fallback="chain")
 
+        # Safely serialize inputs
+        try:
+            serialized_inputs = _serialize_value(inputs)
+        except Exception as e:
+            logger.warning(f"Failed to serialize inputs in on_chain_start: {e}")
+            serialized_inputs = {"error": f"Failed to serialize: {str(e)}"}
+
         # Check if this is a LangGraph node
         is_graph_node = metadata and metadata.get("langgraph_node")
 
@@ -338,7 +514,7 @@ class LocalTraceCallback(BaseCallbackHandler):
                 run_id=run_id,
                 name=metadata.get("langgraph_node", name),
                 parent_run_id=parent_run_id,
-                inputs=inputs,
+                inputs=serialized_inputs,
                 metadata=metadata,
                 tags=tags,
             )
@@ -348,7 +524,7 @@ class LocalTraceCallback(BaseCallbackHandler):
                 run_id=run_id,
                 name=name,
                 parent_run_id=parent_run_id,
-                inputs=inputs,
+                inputs=serialized_inputs,
                 metadata=metadata,
                 tags=tags,
             )
@@ -364,12 +540,19 @@ class LocalTraceCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Handle chain end."""
+        # Safely serialize outputs
+        try:
+            serialized_outputs = _serialize_value(outputs)
+        except Exception as e:
+            logger.warning(f"Failed to serialize outputs in on_chain_end: {e}")
+            serialized_outputs = {"error": f"Failed to serialize: {str(e)}"}
+
         event = self._create_event(
             event_type=TraceEventType.CHAIN_END,
             run_id=run_id,
             name="chain",
             parent_run_id=parent_run_id,
-            outputs=outputs,
+            outputs=serialized_outputs,
             tags=tags,
         )
         self.store.add_event(event)
@@ -384,12 +567,42 @@ class LocalTraceCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Handle chain error."""
+        # Extract detailed error information
+        import traceback
+
+        error_msg = str(error) if error else "Unknown error"
+        error_type = type(error).__name__ if error else "UnknownError"
+        error_traceback = (
+            "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            if error
+            else ""
+        )
+
+        # Construct detailed error message
+        detailed_error = f"{error_type}: {error_msg}"
+        if error_traceback:
+            detailed_error += f"\n\nTraceback:\n{error_traceback}"
+
+        # Log the error
+        logger.error(f"Chain error in run {run_id}: {detailed_error}")
+
+        # Also print to console for immediate visibility
+        print(f"\n{'='*80}")
+        print(f"CHAIN ERROR DETECTED")
+        print(f"Run ID: {run_id}")
+        print(f"Task ID: {self._get_task_id(tags)}")
+        print(f"Error Type: {error_type}")
+        print(f"Error Message: {error_msg}")
+        if error_traceback:
+            print(f"\nFull Traceback:\n{error_traceback}")
+        print(f"{'='*80}\n")
+
         event = self._create_event(
             event_type=TraceEventType.CHAIN_ERROR,
             run_id=run_id,
             name="chain",
             parent_run_id=parent_run_id,
-            error=str(error),
+            error=detailed_error,
             tags=tags,
         )
         self.store.add_event(event)
@@ -578,16 +791,22 @@ class LocalTraceCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Async handle LLM start."""
-        # Delegate to sync version
-        super().on_llm_start(
-            serialized,
-            prompts,
+        if not self.config.log_llm_io:
+            return
+
+        self._record_start(run_id)
+        name = _name_from_serialized(serialized, fallback="llm")
+
+        event = self._create_event(
+            event_type=TraceEventType.LLM_START,
             run_id=run_id,
+            name=name,
             parent_run_id=parent_run_id,
-            tags=tags,
+            inputs={"prompts": prompts},
             metadata=metadata,
-            **kwargs,
+            tags=tags,
         )
+        self.store.add_event(event)
 
     async def on_chat_model_start(
         self,
@@ -601,15 +820,33 @@ class LocalTraceCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Async handle chat model start."""
-        super().on_chat_model_start(
-            serialized,
-            messages,
+        if not self.config.log_llm_io:
+            return
+
+        self._record_start(run_id)
+        name = _name_from_serialized(serialized, fallback="chat_model")
+
+        # Serialize messages
+        serialized_messages = [_serialize_messages(msgs) for msgs in messages]
+
+        # Store for pairing with llm_end
+        task_id = self._get_task_id(tags, metadata)
+        self._pending_llm_calls[str(run_id)] = {
+            "task_id": task_id,
+            "messages": serialized_messages[0] if serialized_messages else [],
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        }
+
+        event = self._create_event(
+            event_type=TraceEventType.CHAT_MODEL_START,
             run_id=run_id,
+            name=name,
             parent_run_id=parent_run_id,
-            tags=tags,
+            inputs={"messages": serialized_messages},
             metadata=metadata,
-            **kwargs,
+            tags=tags,
         )
+        self.store.add_event(event)
 
     # ========== Custom Event Method ==========
 
