@@ -1,6 +1,10 @@
+import json
 import logging
+import re
 from operator import itemgetter
-from typing import Any, List, Literal, Optional, Type, Union, cast
+from pathlib import Path
+from string import Template
+from typing import Any, Dict, List, Literal, Optional, Type, Union, cast
 
 try:
     from openai import RateLimitError as OpenAIRateLimitError
@@ -11,7 +15,7 @@ from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.outputs import ChatResult
 from langchain_core.runnables import (
@@ -29,6 +33,216 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
+
+
+def _get_message_role(msg: BaseMessage) -> str:
+    """Get the role of a message.
+
+    Args:
+        msg: Message to get role for
+
+    Returns:
+        Role string: 'user', 'assistant', or 'system'
+    """
+    if isinstance(msg, HumanMessage):
+        return "user"
+    elif isinstance(msg, AIMessage):
+        return "assistant"
+    elif isinstance(msg, SystemMessage):
+        return "system"
+    else:
+        # Default to user for unknown types
+        return "user"
+
+
+def extract_json_from_text(text: str) -> str:
+    """Extract JSON from text that may contain markdown, headers, or explanations.
+
+    This function tries multiple strategies to extract valid JSON:
+    1. Look for JSON inside ```json code blocks
+    2. Look for JSON inside ``` code blocks (any language)
+    3. Look for JSON object/array patterns in the text
+    4. Return original text if no extraction works
+
+    Args:
+        text: Text that may contain JSON with additional markup
+
+    Returns:
+        Extracted JSON string (or original text if extraction fails)
+    """
+    # Strategy 1: Try to find JSON in ```json code blocks
+    json_block_pattern = r"```json\s*\n(.*?)\n```"
+    match = re.search(json_block_pattern, text, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
+    # Strategy 2: Try to find JSON in any ``` code blocks
+    code_block_pattern = r"```\s*\n(.*?)\n```"
+    match = re.search(code_block_pattern, text, re.DOTALL)
+    if match:
+        extracted = match.group(1).strip()
+        # Check if it looks like JSON
+        if extracted.startswith(("{", "[")):
+            return extracted
+
+    # Strategy 3: Try to find JSON object/array patterns in the text
+    # Find the first { and match it with the last }
+    json_obj_pattern = r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}"
+    match = re.search(json_obj_pattern, text, re.DOTALL)
+    if match:
+        candidate = match.group(0)
+        # Validate it's actually JSON by trying to parse
+        try:
+            json.loads(candidate)
+            return candidate
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 4: Try to find JSON array patterns
+    json_arr_pattern = r"\[(?:[^\[\]]|(?:\[[^\[\]]*\]))*\]"
+    match = re.search(json_arr_pattern, text, re.DOTALL)
+    if match:
+        candidate = match.group(0)
+        # Validate it's actually JSON by trying to parse
+        try:
+            json.loads(candidate)
+            return candidate
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # If nothing worked, return original text
+    return text
+
+
+class LenientOutputParser:
+    """Wrapper parser that extracts JSON from text before parsing.
+
+    This wrapper allows headers or explanations around JSON as long as
+    a valid JSON object/array is present (e.g., inside a code block).
+
+    Args:
+        base_parser: The underlying LangChain output parser.
+    """
+
+    def __init__(self, base_parser: Runnable) -> None:
+        self.base_parser = base_parser
+
+    def get_format_instructions(self) -> str:
+        """Return format instructions from the base parser.
+
+        Returns:
+            Format instructions string.
+        """
+        return self.base_parser.get_format_instructions()
+
+    def parse(self, text: str) -> Any:
+        """Parse output after extracting JSON from the response text.
+
+        Args:
+            text: Raw LLM response text.
+
+        Returns:
+            Parsed output from the base parser.
+        """
+        self._validate_json_codeblock(text)
+        normalized_text = extract_json_from_text(text)
+        return self.base_parser.parse(normalized_text)
+
+    @staticmethod
+    def _validate_json_codeblock(text: str) -> None:
+        """Require a single JSON code block as the final response."""
+        stripped = (text or "").strip()
+        if not stripped:
+            return
+
+        codeblock_pattern = r"```json\s*\n[\s\S]*?\n```"
+        matches = list(re.finditer(codeblock_pattern, stripped))
+        if len(matches) != 1:
+            raise ValueError(
+                "CRITICAL: Output must contain exactly one ```json ...``` code block."
+            )
+
+        match = matches[0]
+        before = stripped[: match.start()]
+        after = stripped[match.end() :]
+
+        if "```" in before or "```" in after:
+            raise ValueError(
+                "CRITICAL: Only one JSON code block is allowed. Remove other code blocks."
+            )
+
+        if after.strip():
+            raise ValueError(
+                "CRITICAL: JSON code block must be the final content (no text after)."
+            )
+
+
+def validate_message_sequence(messages: List[BaseMessage]) -> None:
+    """Validate message sequence for strict chat APIs (e.g., Snowflake Cortex).
+
+    Requirements:
+    1. Only ONE system message, and it must be the FIRST message
+    2. After system message, roles must strictly alternate: user-assistant-user-assistant
+    3. No consecutive messages with the same role
+
+    Args:
+        messages: List of messages to validate
+
+    Raises:
+        ValueError: If message sequence violates requirements
+    """
+    if not messages:
+        return
+
+    violations = []
+
+    # Check 1: System message must be first (if present)
+    if messages and not isinstance(messages[0], SystemMessage):
+        violations.append("First message is not SystemMessage")
+
+    # Check 2: Only one system message allowed
+    system_msg_count = sum(1 for msg in messages if isinstance(msg, SystemMessage))
+    if system_msg_count > 1:
+        violations.append(f"Found {system_msg_count} system messages (only 1 allowed)")
+
+    # Check 3: System message must be first (if exists)
+    system_indices = [
+        i for i, msg in enumerate(messages) if isinstance(msg, SystemMessage)
+    ]
+    if system_indices and system_indices[0] != 0:
+        violations.append(
+            f"System message is at index {system_indices[0]}, not at index 0"
+        )
+
+    # Check 4: Strict user-assistant alternation after system message
+    start_idx = 1 if isinstance(messages[0], SystemMessage) else 0
+    if start_idx < len(messages):
+        expected_role = "user"
+        for i in range(start_idx, len(messages)):
+            msg_role = _get_message_role(messages[i])
+            if msg_role != expected_role:
+                violations.append(
+                    f"Message {i}: expected '{expected_role}', got '{msg_role}' "
+                    f"(role sequence broken)"
+                )
+                break
+            expected_role = "assistant" if msg_role == "user" else "user"
+
+    # Raise error if violations found
+    if violations:
+        violation_str = "; ".join(violations)
+        msg_structure = [_get_message_role(m) for m in messages]
+        error_msg = (
+            f"Message sequence validation FAILED - {violation_str}\n"
+            f"Message structure: {msg_structure}\n"
+            f"This indicates a bug in chat history management. "
+            f"Please check bootstrap flow and tool summary additions."
+        )
+        raise ValueError(error_msg)
+
+    logging.debug(
+        f"Message sequence validation passed: {[_get_message_role(m) for m in messages]}"
+    )
 
 
 def is_rate_limit_error(exception: Exception) -> bool:
@@ -177,6 +391,40 @@ def truncate_messages(
     return result
 
 
+def load_default_templates() -> Dict[str, str]:
+    """
+    Load default format instruction templates from files.
+
+    Templates are loaded from:
+    - templates/system_format.txt
+    - templates/retry_error_format.txt
+    - templates/retry_hint_format.txt
+
+    Returns:
+        Dictionary with keys: 'system_format', 'retry_error_format', 'retry_hint_format'
+    """
+    template_dir = Path(__file__).parent / "templates"
+
+    templates = {}
+    template_names = [
+        "system_format",
+        "retry_error_format",
+        "retry_hint_format",
+        "structured_output_format",
+    ]
+
+    for name in template_names:
+        template_path = template_dir / f"{name}.txt"
+        with open(template_path, "r", encoding="utf-8") as f:
+            templates[name] = f.read()
+
+    return templates
+
+
+# Load default templates at module level (cached globally)
+DEFAULT_TEMPLATES = load_default_templates()
+
+
 class GeneralChatModel(BaseChatModel):
     """
     A unified chat model wrapper that supports multiple LLM providers.
@@ -269,6 +517,9 @@ class GeneralChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        # Validate message sequence before processing
+        validate_message_sequence(messages)
+
         # Debug: Log the input messages before sending to LLM
         logging.debug(f"Input messages to LLM:")
         for i, msg in enumerate(messages):
@@ -279,35 +530,6 @@ class GeneralChatModel(BaseChatModel):
         # Track if we've already truncated once
         attempt_count = 0
         current_messages = messages
-
-        # Preemptive truncation to prevent automatic context window truncation
-        # This applies to any platform when num_ctx is specified
-        if self.num_ctx:
-            # Calculate approximate token count (rough estimate: 1 token ≈ 4 characters)
-            total_chars = sum(len(str(msg.content)) for msg in current_messages)
-            approximate_tokens = total_chars // 4
-
-            # If we're close to or exceeding the context window, preemptively truncate
-            # Use 80% of context window as safety margin (reserve space for output)
-            max_input_tokens = int(self.num_ctx * 0.8)
-
-            if approximate_tokens > max_input_tokens:
-                max_chars = max_input_tokens * 4  # Convert back to characters
-                logging.warning(
-                    f"Context window prevention: {approximate_tokens} tokens exceeds "
-                    f"{max_input_tokens} tokens limit (80% of {self.num_ctx}). "
-                    f"Preemptively truncating to {max_chars} chars..."
-                )
-                current_messages = truncate_messages(
-                    current_messages, max_chars=max_chars
-                )
-
-                # Log the truncation result
-                new_total_chars = sum(len(str(msg.content)) for msg in current_messages)
-                new_approximate_tokens = new_total_chars // 4
-                logging.info(
-                    f"After truncation: {new_approximate_tokens} tokens ({new_total_chars} chars)"
-                )
 
         # Create a custom retry function that handles rate limits with infinite retry
         def _generate_with_smart_retry():
@@ -408,15 +630,7 @@ class GeneralChatModel(BaseChatModel):
                         logging.error(f"Content filter triggered: {e}")
                         raise
 
-                    # Max tokens errors - don't retry
-                    if (
-                        "max tokens" in error_msg
-                        or "maximum context length" in error_msg
-                    ):
-                        logging.error(f"Max tokens exceeded: {e}")
-                        raise
-
-                    # Payload too large errors - try truncating
+                    # Payload too large / max tokens errors - try truncating
                     if any(
                         phrase in error_msg
                         for phrase in [
@@ -425,13 +639,15 @@ class GeneralChatModel(BaseChatModel):
                             "413",
                             "context length exceeded",
                             "request too large",
+                            "max tokens",
+                            "maximum context length",
                         ]
                     ):
                         if other_error_attempt <= 3:  # Try truncating up to 3 times
                             # Progressive truncation: reduce by more each attempt
                             max_chars = 50000 // other_error_attempt
                             logging.warning(
-                                f"Payload too large error detected (attempt {other_error_attempt}). "
+                                f"Payload too large/max tokens error detected (attempt {other_error_attempt}). "
                                 f"Truncating messages to {max_chars} chars..."
                             )
                             current_messages = truncate_messages(
@@ -440,7 +656,7 @@ class GeneralChatModel(BaseChatModel):
                             continue  # Retry with truncated messages
                         else:
                             logging.error(
-                                f"Payload still too large after {other_error_attempt} truncation attempts"
+                                f"Payload still too large/max tokens after {other_error_attempt} truncation attempts"
                             )
                             raise
 
@@ -469,7 +685,11 @@ class GeneralChatModel(BaseChatModel):
         schema: Union[Type[BaseModel], dict, None] = None,
         *,
         method: Literal["json_mode"] = "json_mode",
-        include_raw: bool = False,
+        custom_parser_format_instructions: Optional[str] = None,
+        custom_format_template: Optional[str] = None,
+        custom_retry_error_template: Optional[str] = None,
+        custom_retry_hint_template: Optional[str] = None,
+        max_parsing_retries: int = 3,
         **kwargs: Any,
     ) -> Runnable[LanguageModelInput, Union[dict, BaseModel]]:
         """Model wrapper that returns outputs formatted to match the given schema.
@@ -490,18 +710,32 @@ class GeneralChatModel(BaseChatModel):
                 - Add format instructions to the system message
                 - Use PydanticOutputParser or JsonOutputParser to parse the output
 
-            include_raw: If False, only the parsed output is returned.
-                If True, returns a dict with keys:
-                - 'raw': BaseMessage
-                - 'parsed': Parsed output (or None if parsing error)
-                - 'parsing_error': Exception or None
+            custom_parser_format_instructions: Optional custom format instructions from parser.
+                This replaces the output of `output_parser.get_format_instructions()`.
+                Use this when the default parser format instructions are not suitable.
+                If None, uses `output_parser.get_format_instructions()`.
+
+            custom_format_template: Optional custom template for initial format instructions.
+                Should contain placeholder: {format_instructions}
+                If None, uses default template from structured_output_format.txt
+
+            custom_retry_error_template: Optional custom template for retry error messages.
+                Should contain placeholders: {attempt}, {max_attempts}, {error_type}, {error_message}
+                If None, uses default template from retry_error_format.txt
+
+            custom_retry_hint_template: Optional custom template for retry hint messages.
+                Should contain placeholder: {format_instructions}
+                If None, uses default template from retry_hint_format.txt
+
+            max_parsing_retries: Maximum number of parsing retry attempts.
 
             **kwargs: Additional arguments passed to the model.
 
         Returns:
-            A Runnable that takes same inputs as BaseChatModel and outputs:
-            - If include_raw=False: Pydantic instance or dict
-            - If include_raw=True: dict with 'raw', 'parsed', 'parsing_error' keys
+            A Runnable that takes same inputs as BaseChatModel and outputs a dict with keys:
+            - 'raw': BaseMessage (the raw LLM response)
+            - 'parsed': Pydantic instance or dict (or None if parsing failed)
+            - 'parsing_error': Exception or None
 
         Example:
             ```python
@@ -537,18 +771,25 @@ class GeneralChatModel(BaseChatModel):
             # For dict/JSON schema, use JsonOutputParser
             output_parser = JsonOutputParser()
 
-        # Get format instructions from the parser
-        format_instructions = output_parser.get_format_instructions()
-        format_instructions = f"""\
-# Output Format
-First, reason through the problem step-by-step in natural language.
-Explain your thinking process, analysis, and any intermediate steps needed to arrive at the final answer.
-After your reasoning, provide the final structured output wrapped in three backticks (```).
-Make sure to provide exactly ONE structured output in a SINGLE code block at the very end of your response.
-Do not include multiple code blocks or multiple structured outputs.
-The structured output must be the final element of your response.
-{format_instructions}
-"""
+        # Wrap with lenient parser to allow headers/explanations around JSON
+        output_parser = LenientOutputParser(output_parser)
+
+        # Get format instructions from the parser (or use custom if provided)
+        parser_format_instructions = (
+            custom_parser_format_instructions
+            if custom_parser_format_instructions is not None
+            else output_parser.get_format_instructions()
+        )
+
+        # Use custom format template if provided, otherwise use default
+        format_template = (
+            custom_format_template or DEFAULT_TEMPLATES["structured_output_format"]
+        )
+        format_instructions = format_template.format(
+            format_instructions=parser_format_instructions
+        )
+
+        parsing_retries = max(1, max_parsing_retries)
 
         # Create a wrapper that adds format instructions to system message
         def add_format_instructions_to_messages(
@@ -590,23 +831,120 @@ The structured output must be the final element of your response.
 
             return result_messages
 
-        # Create a runnable that preprocesses messages
-        preprocessor = RunnableLambda(add_format_instructions_to_messages)
+        # Create a wrapper with parsing retry logic
+        def invoke_with_parsing_retry(
+            messages: Union[List[BaseMessage], LanguageModelInput],
+            max_parsing_retries: int = parsing_retries,
+        ):
+            """Invoke LLM with automatic retry on parsing failures."""
+            from langchain_core.messages import AIMessage, HumanMessage
 
-        # Chain: preprocess -> GeneralChatModel (with retry logic) -> parse
-        # Use self (GeneralChatModel) instead of self.llm to preserve retry logic
-        llm_chain = preprocessor | self
+            current_messages = add_format_instructions_to_messages(messages)
 
-        if include_raw:
-            # Return dict with raw, parsed, and parsing_error keys
-            parser_assign = RunnablePassthrough.assign(
-                parsed=itemgetter("raw") | output_parser, parsing_error=lambda _: None
-            )
-            parser_none = RunnablePassthrough.assign(parsed=lambda _: None)
-            parser_with_fallback = parser_assign.with_fallbacks(
-                [parser_none], exception_key="parsing_error"
-            )
-            return RunnableMap(raw=llm_chain) | parser_with_fallback
-        else:
-            # Return only parsed output
-            return llm_chain | output_parser
+            for attempt in range(1, max_parsing_retries + 1):
+                # Invoke LLM
+                response = self.invoke(current_messages)
+
+                # Try to parse the response
+                try:
+                    response_text = (
+                        str(response.content)
+                        if hasattr(response, "content")
+                        else str(response)
+                    )
+                    parsed = output_parser.parse(response_text)
+
+                    # Success - return dict with raw, parsed, and no error
+                    return {"raw": response, "parsed": parsed, "parsing_error": None}
+
+                except Exception as e:
+                    # Parsing failed
+                    if attempt >= max_parsing_retries:
+                        # Max retries reached - return dict with error
+                        logging.error(
+                            f"Parsing failed after {max_parsing_retries} attempts. "
+                            f"Last error: {e}"
+                        )
+                        return {"raw": response, "parsed": None, "parsing_error": e}
+
+                    # Build retry message with error feedback
+                    error_type = type(e).__name__
+                    error_message = str(e)
+                    # Use string.Template to safely substitute error_message
+                    # This avoids KeyError from .format() when error_message contains {key} patterns
+
+                    # Use custom templates if provided, otherwise use defaults
+                    retry_error_template_str = (
+                        custom_retry_error_template
+                        or DEFAULT_TEMPLATES["retry_error_format"]
+                    )
+                    retry_hint_template_str = (
+                        custom_retry_hint_template
+                        or DEFAULT_TEMPLATES["retry_hint_format"]
+                    )
+
+                    def safe_format(template_str: str, **kwargs) -> str:
+                        """Safely format template with Jinja2 + brace placeholders."""
+                        # First, try Jinja2 rendering (supports {{ var }} syntax)
+                        try:
+                            from jinja2 import Template
+
+                            template_str = Template(template_str).render(**kwargs)
+                        except Exception:
+                            # Fall back to raw string if Jinja2 rendering fails
+                            pass
+
+                        # Then replace {key} placeholders safely
+                        import uuid
+
+                        placeholders = {}
+                        result = template_str
+                        for key, value in kwargs.items():
+                            marker = (
+                                f"__PLACEHOLDER_{key.upper()}_{uuid.uuid4().hex[:8]}__"
+                            )
+                            placeholders[marker] = str(value)
+                            result = result.replace(f"{{{key}}}", marker)
+
+                        # Now replace markers with actual values
+                        for marker, value in placeholders.items():
+                            result = result.replace(marker, value)
+
+                        return result
+
+                    retry_error_msg = safe_format(
+                        retry_error_template_str,
+                        attempt=attempt,
+                        max_attempts=max_parsing_retries,
+                        error_type=error_type,
+                        error_message=error_message,
+                    )
+
+                    retry_hint_msg = safe_format(
+                        retry_hint_template_str,
+                        format_instructions=parser_format_instructions,
+                    )
+
+                    retry_feedback = f"{retry_error_msg}\n\n{retry_hint_msg}"
+
+                    logging.warning(
+                        f"Parsing attempt {attempt}/{max_parsing_retries} failed: {error_type}. "
+                        f"Retrying with format reminder..."
+                    )
+
+                    # Build message chain for retry:
+                    # 1. Original chat history (already in current_messages with format instructions)
+                    # 2. AIMessage: The LLM's response that failed to parse
+                    # 3. HumanMessage: Error feedback + format hint
+                    response_content = (
+                        str(response.content)
+                        if hasattr(response, "content")
+                        else str(response)
+                    )
+                    current_messages = current_messages + [
+                        AIMessage(content=response_content),
+                        HumanMessage(content=retry_feedback),
+                    ]
+
+        # Create runnable from the retry wrapper
+        return RunnableLambda(lambda x: invoke_with_parsing_retry(x))  # type: ignore

@@ -1,0 +1,6 @@
+# Output Format
+You must follow this exact format:
+
+{format_instructions}
+
+Failure to follow this format will result in parsing errors.

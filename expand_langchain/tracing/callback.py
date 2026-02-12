@@ -1,8 +1,11 @@
 """LangChain callback handler for local tracing."""
 
 import logging
+import os
+import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import UUID
 
@@ -15,8 +18,59 @@ from langchain_core.outputs import ChatGenerationChunk, GenerationChunk, LLMResu
 from .config import TracingConfig
 from .models import TraceEvent, TraceEventType
 from .store import TraceStore
+from .yaml_utils import dump_yaml
 
 logger = logging.getLogger(__name__)
+
+
+def _dump_yaml(data: Any) -> str:
+    return dump_yaml(data)
+
+
+def _is_disallowed_path(path: Path) -> bool:
+    if str(path).startswith("/tmp"):
+        return True
+    if str(path).startswith("/dev/shm"):
+        return True
+    return False
+
+
+def _sanitize_filename(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("_")
+    return safe or "llm"
+
+
+def _resolve_snapshot_dir() -> Optional[Path]:
+    env_dir = os.getenv("EXPAND_TRACE_SNAPSHOT_DIR", "").strip()
+    if env_dir:
+        path = Path(env_dir).expanduser()
+        if not path.is_absolute():
+            path = (Path.cwd() / path).resolve()
+        if _is_disallowed_path(path):
+            logger.warning(
+                "Snapshot dir under /tmp or /dev/shm is not allowed: %s", path
+            )
+            return None
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    pytest_spec = os.getenv("PYTEST_CURRENT_TEST", "").strip()
+    if pytest_spec:
+        test_path = pytest_spec.split("::", 1)[0].strip()
+        if test_path:
+            path = Path(test_path)
+            if not path.is_absolute():
+                path = (Path.cwd() / path).resolve()
+            snapshot_dir = path.parent / "trace_snapshots"
+            if _is_disallowed_path(snapshot_dir):
+                logger.warning(
+                    "Snapshot dir under /tmp or /dev/shm is not allowed: %s",
+                    snapshot_dir,
+                )
+                return None
+            snapshot_dir.mkdir(parents=True, exist_ok=True)
+            return snapshot_dir
+    return None
 
 
 def _truncate(value: Any, max_length: int) -> Any:
@@ -122,6 +176,37 @@ def _serialize_value(value: Any) -> Any:
     return str(value)
 
 
+def _summarize_text(value: str, max_length: int) -> str:
+    """Summarize text for trace readability.
+
+    Args:
+        value: Text to summarize
+        max_length: Maximum length to keep
+
+    Returns:
+        Possibly truncated text
+    """
+    if max_length <= 0:
+        return value
+    return _truncate(value, max_length)
+
+
+def _format_message_for_text(msg: Dict[str, Any], max_length: int) -> str:
+    """Format a serialized message for text trace output.
+
+    Args:
+        msg: Serialized message dict
+        max_length: Maximum length for content
+
+    Returns:
+        Formatted message string
+    """
+    msg_type = msg.get("type", "unknown").upper()
+    raw_content = msg.get("content", "") or ""
+    content = _summarize_text(str(raw_content), max_length)
+    return f"[{msg_type}] (len={len(str(raw_content))})\n{content}"
+
+
 def _name_from_serialized(serialized: Any, fallback: str = "unknown") -> str:
     """Best-effort component name extraction.
 
@@ -169,6 +254,8 @@ class LocalTraceCallback(BaseCallbackHandler):
         self._pending_llm_calls: Dict[str, Dict[str, Any]] = (
             {}
         )  # Store start events by run_id
+        self._snapshot_dir = _resolve_snapshot_dir()
+        self._snapshot_node_filter = os.getenv("EXPAND_TRACE_SNAPSHOT_NODE", "").strip()
 
     def set_task_id(self, task_id: str):
         """Set the current task ID for tracing.
@@ -199,34 +286,81 @@ class LocalTraceCallback(BaseCallbackHandler):
             response_text: LLM response
             timestamp: Timestamp string
         """
-        if not self.config.log_llm_io:
-            return
+        # LLM I/O text logs are disabled to avoid per-call text file output.
+        return
 
         try:
             text_file = self.config.traces_dir / f"{task_id}_llm_io.txt"
+            max_len = max(0, int(self.config.max_content_length or 0))
+            if max_len <= 0:
+                max_len = 2000
+
+            summarized_response = _summarize_text(str(response_text), max_len)
+
             with open(text_file, "a", encoding="utf-8") as f:
                 f.write("=" * 80 + "\n")
                 f.write(f"LLM Call #{call_number}\n")
                 f.write(f"Timestamp: {timestamp}\n")
+                f.write(f"Max content length: {max_len}\n")
                 f.write("=" * 80 + "\n\n")
 
-                # Write input messages
-                f.write("INPUT MESSAGES:\n")
+                # Write input messages (summarized)
+                f.write("INPUT MESSAGES (SUMMARY):\n")
                 f.write("-" * 80 + "\n")
                 for i, msg in enumerate(messages, 1):
-                    msg_type = msg.get("type", "unknown")
-                    msg_content = msg.get("content", "")
-                    f.write(f"\n[Message {i} - {msg_type.upper()}]\n")
-                    f.write(msg_content + "\n")
+                    f.write(f"\n[Message {i}]\n")
+                    f.write(_format_message_for_text(msg, max_len) + "\n")
 
-                # Write output
+                # Write output (summarized)
                 f.write("\n" + "-" * 80 + "\n")
-                f.write("OUTPUT RESPONSE:\n")
+                f.write("OUTPUT RESPONSE (SUMMARY):\n")
                 f.write("-" * 80 + "\n")
-                f.write(response_text + "\n\n")
+                f.write(summarized_response + "\n\n")
 
         except Exception as e:
             logger.debug(f"Failed to write LLM I/O text file: {e}")
+
+    def _should_write_snapshot(self, node_name: Optional[str], model_name: str) -> bool:
+        if self._snapshot_dir is None:
+            return False
+        if not self._snapshot_node_filter:
+            return True
+        target = (node_name or "") + " " + (model_name or "")
+        return self._snapshot_node_filter in target
+
+    def _write_llm_snapshot(
+        self,
+        task_id: str,
+        call_number: int,
+        messages: List[Dict[str, Any]],
+        response_text: str,
+        timestamp: str,
+        node_name: Optional[str],
+        model_name: str,
+    ) -> None:
+        if self._snapshot_dir is None:
+            return
+
+        safe_task = _sanitize_filename(task_id)
+        safe_node = _sanitize_filename(node_name or model_name or "llm")
+        safe_stamp = _sanitize_filename(timestamp.replace(" ", "_"))
+        filename = f"{safe_task}_llm_{call_number:03d}_{safe_node}_{safe_stamp}.yaml"
+        path = self._snapshot_dir / filename
+
+        payload = {
+            "task_id": task_id,
+            "call_number": call_number,
+            "node_name": node_name,
+            "model_name": model_name,
+            "timestamp": timestamp,
+            "messages": messages,
+            "response_text": response_text,
+        }
+
+        try:
+            path.write_text(_dump_yaml(payload), encoding="utf-8")
+        except Exception as e:
+            logger.warning("Failed to write LLM snapshot to %s: %s", path, e)
 
     def _get_task_id(
         self,
@@ -327,6 +461,21 @@ class LocalTraceCallback(BaseCallbackHandler):
         """
         self._run_start_times[str(run_id)] = time.time()
 
+    def _should_record_event(self, event_type: TraceEventType) -> bool:
+        if event_type in {
+            TraceEventType.GRAPH_NODE_START,
+            TraceEventType.CHAIN_END,
+        }:
+            return False
+        if self.config.event_types is None:
+            return True
+        return event_type.value in self.config.event_types
+
+    def _record_event(self, event: TraceEvent) -> None:
+        if not self._should_record_event(event.event_type):
+            return
+        self.store.add_event(event)
+
     # ========== LLM Callbacks ==========
 
     def on_llm_start(
@@ -360,7 +509,19 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
+
+        run_id_str = str(run_id)
+        if run_id_str not in self._pending_llm_calls:
+            task_id = self._get_task_id(tags, metadata)
+            self._pending_llm_calls[run_id_str] = {
+                "task_id": task_id,
+                "messages": [],
+                "prompts": prompts,
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                "node_name": metadata.get("langgraph_node") if metadata else None,
+                "model_name": name,
+            }
 
     def on_llm_end(
         self,
@@ -387,6 +548,7 @@ class LocalTraceCallback(BaseCallbackHandler):
 
         # Write to human-readable text file if paired with chat_model_start
         run_id_str = str(run_id)
+        pending = None
         if run_id_str in self._pending_llm_calls:
             pending = self._pending_llm_calls.pop(run_id_str)
             task_id = pending["task_id"]
@@ -409,15 +571,36 @@ class LocalTraceCallback(BaseCallbackHandler):
                 timestamp=pending["timestamp"],
             )
 
+            node_name = pending.get("node_name")
+            model_name = pending.get("model_name", "llm")
+            if self._should_write_snapshot(node_name, model_name):
+                self._write_llm_snapshot(
+                    task_id=task_id,
+                    call_number=call_number,
+                    messages=pending["messages"],
+                    response_text=response_text,
+                    timestamp=pending["timestamp"],
+                    node_name=node_name,
+                    model_name=model_name,
+                )
+
         event = self._create_event(
             event_type=TraceEventType.LLM_END,
             run_id=run_id,
             name="llm",
             parent_run_id=parent_run_id,
+            inputs=(
+                {
+                    "messages": pending.get("messages", []),
+                    "prompts": pending.get("prompts", []),
+                }
+                if pending
+                else None
+            ),
             outputs=outputs,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_llm_error(
         self,
@@ -429,6 +612,28 @@ class LocalTraceCallback(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Handle LLM error."""
+        # Write to llm_io.txt if this was a pending LLM call
+        run_id_str = str(run_id)
+        if run_id_str in self._pending_llm_calls:
+            pending = self._pending_llm_calls.pop(run_id_str)
+            task_id = pending["task_id"]
+
+            # Increment call counter
+            self._llm_call_counter[task_id] = self._llm_call_counter.get(task_id, 0) + 1
+            call_number = self._llm_call_counter[task_id]
+
+            # Format error message as response
+            error_message = f"### LLM ERROR ###\n\n{type(error).__name__}: {str(error)}"
+
+            # Write to text file with error marker
+            self._write_llm_io_text(
+                task_id=task_id,
+                call_number=call_number,
+                messages=pending["messages"],
+                response_text=error_message,
+                timestamp=pending["timestamp"],
+            )
+
         event = self._create_event(
             event_type=TraceEventType.LLM_ERROR,
             run_id=run_id,
@@ -437,7 +642,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             error=str(error),
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Chat Model Callbacks ==========
 
@@ -464,10 +669,14 @@ class LocalTraceCallback(BaseCallbackHandler):
 
         # Store for pairing with llm_end
         task_id = self._get_task_id(tags, metadata)
+        node_name = metadata.get("langgraph_node") if metadata else None
         self._pending_llm_calls[str(run_id)] = {
             "task_id": task_id,
             "messages": serialized_messages[0] if serialized_messages else [],
+            "prompts": [],
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+            "node_name": node_name,
+            "model_name": name,
         }
 
         event = self._create_event(
@@ -479,7 +688,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Chain Callbacks ==========
 
@@ -528,7 +737,7 @@ class LocalTraceCallback(BaseCallbackHandler):
                 metadata=metadata,
                 tags=tags,
             )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_chain_end(
         self,
@@ -555,7 +764,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             outputs=serialized_outputs,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_chain_error(
         self,
@@ -605,7 +814,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             error=detailed_error,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Tool Callbacks ==========
 
@@ -637,7 +846,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_tool_end(
         self,
@@ -660,7 +869,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             outputs={"output": str(output) if output else None},
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_tool_error(
         self,
@@ -680,7 +889,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             error=str(error),
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Agent Callbacks ==========
 
@@ -702,7 +911,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             inputs={"tool_input": action.tool_input, "log": action.log},
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_agent_finish(
         self,
@@ -722,7 +931,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             outputs={"return_values": finish.return_values, "log": finish.log},
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Retriever Callbacks ==========
 
@@ -750,7 +959,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def on_retriever_end(
         self,
@@ -775,7 +984,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             },
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Async Versions ==========
 
@@ -806,7 +1015,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     async def on_chat_model_start(
         self,
@@ -846,7 +1055,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             metadata=metadata,
             tags=tags,
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     # ========== Custom Event Method ==========
 
@@ -873,7 +1082,7 @@ class LocalTraceCallback(BaseCallbackHandler):
             inputs=data,
             task_id=task_id or self._current_task_id or "unknown",
         )
-        self.store.add_event(event)
+        self._record_event(event)
 
     def finalize(self, task_id: Optional[str] = None):
         """Finalize tracing for a task.

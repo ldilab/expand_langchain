@@ -1,0 +1,7 @@
+### Parsing Error (Attempt {attempt}/{max_attempts}) ###
+
+**Error Type:** {error_type}
+
+**Details:** {error_message}
+
+**Fix:** Please ensure your output follows the format exactly.

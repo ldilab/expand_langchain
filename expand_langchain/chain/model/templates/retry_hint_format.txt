@@ -1,0 +1,7 @@
+### Format Reminder ###
+
+{format_instructions}
+
+Remember: Your response MUST be valid JSON/structured output.
+Return exactly ONE ```json code block as the final element of your response.
+Do not include any text after the code block.

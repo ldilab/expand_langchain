@@ -1,0 +1,9 @@
+# Output Format
+First, reason through the problem step-by-step in natural language.
+Explain your thinking process, analysis, and any intermediate steps needed to arrive at the final answer.
+After your reasoning, provide the final structured output wrapped in a single ```json code block.
+Make sure to provide exactly ONE structured output in a SINGLE code block at the very end of your response.
+Do not include multiple code blocks or multiple structured outputs.
+The structured output must be the final element of your response with no text after the code block.
+If you include any headers or explanations, the JSON MUST still appear only inside that final ```json code block.
+{format_instructions}

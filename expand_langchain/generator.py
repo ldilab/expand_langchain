@@ -31,7 +31,7 @@ class Generator(BaseModel):
     save_on: bool = True
     rerun: bool = False
     max_concurrency: int = 4
-    recursion_limit: int = 100
+    recursion_limit: int = 500
 
     verbose: bool = False
     debug: bool = False
@@ -42,12 +42,17 @@ class Generator(BaseModel):
     langfuse_on: bool = False
 
     # Local tracing (file-based) - designed to be a lightweight alternative to Langfuse
-    tracing_on: bool = False
-    tracing_realtime: bool = True
+    tracing_on: bool = True
+    tracing_realtime: bool = False
     tracing_log_llm_io: bool = True
     tracing_log_tool_io: bool = True
     tracing_log_graph_state: bool = True
     tracing_max_content_length: int = 10000
+    tracing_write_snapshots: bool = True
+    tracing_snapshot_node_filter: Optional[str] = None
+    tracing_write_full_run_histories: bool = True
+    tracing_write_json: bool = False
+    tracing_write_jsonl: bool = False
 
     # private variables
     root_node: Optional[Runnable] = None
@@ -69,6 +74,10 @@ class Generator(BaseModel):
         # Do this BEFORE calling super().__init__() for Pydantic v2 compatibility
         for bool_field in [
             "tracing_on",
+            "tracing_write_snapshots",
+            "tracing_write_full_run_histories",
+            "tracing_write_json",
+            "tracing_write_jsonl",
             "langfuse_on",
             "save_on",
             "rerun",
@@ -84,7 +93,7 @@ class Generator(BaseModel):
         # Initialize result directory FIRST so we have output_dir ready for logging
         self._init_result_dir()
 
-        # Configure logging with file output AFTER result_dir is initialized
+        # Configure logging AFTER result_dir is initialized
         log_level = (
             logging.DEBUG
             if self.debug
@@ -92,30 +101,15 @@ class Generator(BaseModel):
         )
         log_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-        # Force configure root logger with file output
-        if self.save_on and self.output_dir:
-            log_file = str(self.output_dir / "generator.log")
-
-            # Remove existing handlers to avoid conflicts
-            root_logger = logging.getLogger()
-            for handler in root_logger.handlers[:]:
-                root_logger.removeHandler(handler)
-
-            # Create file handler
-            file_handler = logging.FileHandler(log_file, mode="a")
-            file_handler.setLevel(log_level)
-            file_handler.setFormatter(logging.Formatter(log_format))
-            root_logger.addHandler(file_handler)
-
-            # Also add console handler for visibility
-            console_handler = logging.StreamHandler()
-            console_handler.setLevel(log_level)
-            console_handler.setFormatter(logging.Formatter(log_format))
-            root_logger.addHandler(console_handler)
-
-            root_logger.setLevel(log_level)
-        else:
-            logging.basicConfig(level=log_level, format=log_format)
+        # Configure root logger with console output only (no generator.log)
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(logging.Formatter(log_format))
+        root_logger.addHandler(console_handler)
+        root_logger.setLevel(log_level)
 
         logging.getLogger("snowflake").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -151,22 +145,27 @@ class Generator(BaseModel):
             self._tracing_config = TracingConfig(
                 run_name=self.run_name,
                 results_dir="results",
-                enable_realtime_log=self.tracing_realtime,
+                enable_realtime_log=False,
                 log_llm_io=self.tracing_log_llm_io,
                 log_tool_io=self.tracing_log_tool_io,
                 log_graph_state=self.tracing_log_graph_state,
                 max_content_length=self.tracing_max_content_length,
                 pretty_print=True,
+                write_full_run_histories=self.tracing_write_full_run_histories,
+                write_json=self.tracing_write_json,
+                write_jsonl=False,
             )
             self._trace_store = TraceStore(self._tracing_config)
 
-            if self.tracing_realtime:
-                print(
-                    f"TRACING: Realtime log at {self._tracing_config.realtime_log_path}"
-                )
-                print(
-                    f"TRACING: Use 'tail -f {self._tracing_config.realtime_log_path}' to monitor"
-                )
+            if self.tracing_write_snapshots:
+                snapshot_dir = self._tracing_config.traces_dir / "trace_snapshots"
+                os.environ.setdefault("EXPAND_TRACE_SNAPSHOT_DIR", str(snapshot_dir))
+                if self.tracing_snapshot_node_filter:
+                    os.environ["EXPAND_TRACE_SNAPSHOT_NODE"] = (
+                        self.tracing_snapshot_node_filter
+                    )
+
+            print(f"TRACING: YAML trace at {self._tracing_config.trace_yaml_path}")
             print(f"TRACING: Traces dir at {self._tracing_config.traces_dir}")
 
         except Exception as e:
@@ -214,6 +213,20 @@ class Generator(BaseModel):
         dataset = get_dataset(self.dataset_name).run().get_data()
         self.root_node = get_config(self.config_name)
 
+        if dataset and self.id_key not in dataset[0]:
+            if "instance_id" in dataset[0]:
+                logging.info(
+                    "id_key '%s' not found; using instance_id instead.",
+                    self.id_key,
+                )
+                self.id_key = "instance_id"
+            elif "task_id" in dataset[0]:
+                logging.info(
+                    "id_key '%s' not found; using task_id instead.",
+                    self.id_key,
+                )
+                self.id_key = "task_id"
+
         # Filter dataset according to parameters
         if n is not None:
             dataset = dataset[: min(n, len(dataset))]
@@ -221,14 +234,26 @@ class Generator(BaseModel):
             dataset = dataset[start : min(end, len(dataset))]
         elif ids is not None:
             if len(ids) > 0 and isinstance(ids[0], str):
-                # Check if dataset has specified id_key field
-                if dataset and self.id_key in dataset[0]:
+                id_field = None
+                if dataset:
+                    if self.id_key in dataset[0]:
+                        id_field = self.id_key
+                    elif "instance_id" in dataset[0]:
+                        id_field = "instance_id"
+                    elif "task_id" in dataset[0]:
+                        id_field = "task_id"
+
+                if id_field:
                     filtered_dataset = []
                     for item in dataset:
-                        if str(item[self.id_key]) in ids:
+                        if str(item.get(id_field)) in ids:
                             filtered_dataset.append(item)
                     dataset = filtered_dataset
                 else:
+                    logging.warning(
+                        "No id field found in dataset for ids filter; "
+                        "falling back to index matching."
+                    )
                     # Use index as id
                     filtered_dataset = []
                     for i, item in enumerate(dataset):

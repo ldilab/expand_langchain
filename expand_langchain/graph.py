@@ -95,11 +95,14 @@ class CustomStateGraph(StateGraph):
         state_schema: Type[Any],
         nodes: Dict[str, Runnable],
         edges: List[Tuple[str, Union[str, Any]]],
+        context_schema: Optional[Type[Any]] = None,
         config_schema: Optional[Type[Any]] = None,
     ):
+        if context_schema is None and config_schema is not None:
+            context_schema = config_schema
         super().__init__(
             state_schema=state_schema,
-            config_schema=config_schema,
+            context_schema=context_schema,
         )
 
         for _k, node in nodes.items():
