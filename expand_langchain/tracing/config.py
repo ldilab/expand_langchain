@@ -52,7 +52,7 @@ class TracingConfig:
     log_llm_io: bool = True
     log_tool_io: bool = True
     log_graph_state: bool = True
-    max_content_length: int = 10000
+    max_content_length: int = 0
     pretty_print: bool = True
     write_full_run_histories: bool = True
     write_json: bool = False

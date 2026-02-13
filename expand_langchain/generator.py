@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from traceback import format_exc
@@ -47,7 +48,7 @@ class Generator(BaseModel):
     tracing_log_llm_io: bool = True
     tracing_log_tool_io: bool = True
     tracing_log_graph_state: bool = True
-    tracing_max_content_length: int = 10000
+    tracing_max_content_length: int = 0
     tracing_write_snapshots: bool = True
     tracing_snapshot_node_filter: Optional[str] = None
     tracing_write_full_run_histories: bool = True
@@ -210,8 +211,15 @@ class Generator(BaseModel):
         start: Optional[int] = None,
         end: Optional[int] = None,
     ):
+        run_start = time.perf_counter()
         dataset = get_dataset(self.dataset_name).run().get_data()
         self.root_node = get_config(self.config_name)
+
+        self.lark_message(
+            "Started | "
+            f"config={self.config_name} dataset={self.dataset_name} "
+            f"run_name={self.run_name} total={len(dataset)}"
+        )
 
         if dataset and self.id_key not in dataset[0]:
             if "instance_id" in dataset[0]:
@@ -270,11 +278,21 @@ class Generator(BaseModel):
         else:
             pass
 
-        # If root_node is a StateGraph, compile it with checkpointer
-        if isinstance(self.root_node, StateGraph):
-            asyncio.run(self._run_with_checkpointer(dataset))
-        else:
-            asyncio.run(self._run(dataset))
+        try:
+            # If root_node is a StateGraph, compile it with checkpointer
+            if isinstance(self.root_node, StateGraph):
+                asyncio.run(self._run_with_checkpointer(dataset))
+            else:
+                asyncio.run(self._run(dataset))
+        except Exception as e:
+            self.lark_message(f"Failed with error: {type(e).__name__}: {e}")
+            raise
+        elapsed_s = time.perf_counter() - run_start
+        self.lark_message(
+            "Completed | "
+            f"config={self.config_name} dataset={self.dataset_name} "
+            f"run_name={self.run_name} elapsed_s={elapsed_s:.2f}"
+        )
 
         return self
 
@@ -425,8 +443,19 @@ class Generator(BaseModel):
                     with open(result_file, "r") as f:
                         existing_result = json.load(f)
 
-                    # If the result contains an error, rerun the task
+                    # If the result contains an error, rerun the task unless it is non-rerunnable
                     if "error" in existing_result:
+                        error_text = str(existing_result.get("error", ""))
+                        terminal_error = str(existing_result.get("terminal_error", ""))
+                        if (
+                            terminal_error == "GraphRecursionError"
+                            or "GraphRecursionError" in error_text
+                            or "recursion limit" in error_text.lower()
+                        ):
+                            logging.info(
+                                f"Skipping {id}: previous error is GraphRecursionError (non-rerunnable)"
+                            )
+                            return existing_result
                         logging.info(f"Rerunning {id}: previous result contains error")
                     else:
                         logging.info(f"Skipping {id}: result file already exists")
@@ -498,7 +527,13 @@ class Generator(BaseModel):
             except Exception as e:
                 logging.error(f"Error in running {id}")
                 logging.error(format_exc())
-                result = {"error": format_exc()}
+                error_text = format_exc()
+                result = {"error": error_text}
+                if (
+                    "GraphRecursionError" in error_text
+                    or "recursion limit" in error_text.lower()
+                ):
+                    result["terminal_error"] = "GraphRecursionError"
 
                 if self.debug:
                     raise e
