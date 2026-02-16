@@ -614,6 +614,7 @@ class LocalTraceCallback(BaseCallbackHandler):
         """Handle LLM error."""
         # Write to llm_io.txt if this was a pending LLM call
         run_id_str = str(run_id)
+        pending = None
         if run_id_str in self._pending_llm_calls:
             pending = self._pending_llm_calls.pop(run_id_str)
             task_id = pending["task_id"]
@@ -634,11 +635,44 @@ class LocalTraceCallback(BaseCallbackHandler):
                 timestamp=pending["timestamp"],
             )
 
+            node_name = pending.get("node_name")
+            model_name = pending.get("model_name", "llm")
+            if self._should_write_snapshot(node_name, model_name):
+                self._write_llm_snapshot(
+                    task_id=task_id,
+                    call_number=call_number,
+                    messages=pending["messages"],
+                    response_text=error_message,
+                    timestamp=pending["timestamp"],
+                    node_name=node_name,
+                    model_name=model_name,
+                )
+
         event = self._create_event(
             event_type=TraceEventType.LLM_ERROR,
             run_id=run_id,
-            name="llm",
+            name=pending.get("model_name", "llm") if pending else "llm",
             parent_run_id=parent_run_id,
+            inputs=(
+                {
+                    "messages": pending.get("messages", []),
+                    "prompts": pending.get("prompts", []),
+                }
+                if pending
+                else None
+            ),
+            metadata=(
+                {
+                    "llm_call_number": self._llm_call_counter.get(
+                        pending.get("task_id", ""),
+                        None,
+                    ),
+                    "node_name": pending.get("node_name"),
+                    "model_name": pending.get("model_name"),
+                }
+                if pending
+                else None
+            ),
             error=str(error),
             tags=tags,
         )

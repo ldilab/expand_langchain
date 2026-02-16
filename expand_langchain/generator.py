@@ -37,7 +37,6 @@ class Generator(BaseModel):
     verbose: bool = False
     debug: bool = False
 
-    api_keys_path: str = "api_keys.json"
     id_key: str = "task_id"  # key name for id field in dataset
 
     langfuse_on: bool = False
@@ -121,8 +120,6 @@ class Generator(BaseModel):
             f"Generator init: tracing_on={self.tracing_on} (type: {type(self.tracing_on).__name__}), save_on={self.save_on}"
         )
 
-        self._load_api_keys()
-
         if self.tracing_on:
             self._init_tracing()
 
@@ -196,14 +193,6 @@ class Generator(BaseModel):
         if not self.cache_root and not self.rerun:
             self.cache_root = self.result_root
 
-    def _load_api_keys(self):
-        """Load API keys using the centralized environment config."""
-        env_config = EnvironmentConfig(validate_on_init=False)
-        try:
-            env_config.set_from_api_keys_file(self.api_keys_path)
-        except Exception as e:
-            logging.warning(f"Failed to load API keys from {self.api_keys_path}: {e}")
-
     def run(
         self,
         n: Optional[int] = None,
@@ -214,12 +203,6 @@ class Generator(BaseModel):
         run_start = time.perf_counter()
         dataset = get_dataset(self.dataset_name).run().get_data()
         self.root_node = get_config(self.config_name)
-
-        self.lark_message(
-            "Started | "
-            f"config={self.config_name} dataset={self.dataset_name} "
-            f"run_name={self.run_name} total={len(dataset)}"
-        )
 
         if dataset and self.id_key not in dataset[0]:
             if "instance_id" in dataset[0]:
@@ -288,10 +271,11 @@ class Generator(BaseModel):
             self.lark_message(f"Failed with error: {type(e).__name__}: {e}")
             raise
         elapsed_s = time.perf_counter() - run_start
+        elapsed_min = elapsed_s / 60.0
         self.lark_message(
             "Completed | "
             f"config={self.config_name} dataset={self.dataset_name} "
-            f"run_name={self.run_name} elapsed_s={elapsed_s:.2f}"
+            f"run_name={self.run_name} elapsed_min={elapsed_min:.2f}"
         )
 
         return self
@@ -529,13 +513,14 @@ class Generator(BaseModel):
                 logging.error(format_exc())
                 error_text = format_exc()
                 result = {"error": error_text}
-                if (
+                is_recursion_error = (
                     "GraphRecursionError" in error_text
                     or "recursion limit" in error_text.lower()
-                ):
+                )
+                if is_recursion_error:
                     result["terminal_error"] = "GraphRecursionError"
 
-                if self.debug:
+                if self.debug and not is_recursion_error:
                     raise e
 
             finally:

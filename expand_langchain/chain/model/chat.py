@@ -391,6 +391,46 @@ def truncate_messages(
     return result
 
 
+def reduce_messages_for_payload(
+    messages: List[BaseMessage], max_chars: int
+) -> List[BaseMessage]:
+    """Aggressively reduce messages to fit a strict payload budget.
+
+    Strategy:
+    - Keep only system + last message
+    - Truncate both to fit max_chars
+    """
+    if not messages:
+        return messages
+
+    system_msg = messages[0]
+    last_msg = messages[-1]
+
+    system_content = str(system_msg.content)
+    last_content = str(last_msg.content)
+
+    if max_chars < 200:
+        max_chars = 200
+
+    system_budget = max_chars // 3
+    last_budget = max_chars - system_budget - 50
+
+    if len(system_content) > system_budget:
+        system_content = (
+            system_content[: system_budget // 2]
+            + "\n...[truncated]...\n"
+            + system_content[-system_budget // 2 :]
+        )
+
+    if len(last_content) > last_budget:
+        last_content = "...[truncated]...\n" + last_content[-last_budget:]
+
+    return [
+        system_msg.__class__(content=system_content),
+        last_msg.__class__(content=last_content),
+    ]
+
+
 def load_default_templates() -> Dict[str, str]:
     """
     Load default format instruction templates from files.
@@ -643,9 +683,9 @@ class GeneralChatModel(BaseChatModel):
                             "maximum context length",
                         ]
                     ):
-                        if other_error_attempt <= 3:  # Try truncating up to 3 times
-                            # Progressive truncation: reduce by more each attempt
-                            max_chars = 50000 // other_error_attempt
+                        truncation_steps = [50000, 25000, 16666, 10000, 8000, 6000]
+                        if other_error_attempt <= len(truncation_steps):
+                            max_chars = truncation_steps[other_error_attempt - 1]
                             logging.warning(
                                 f"Payload too large/max tokens error detected (attempt {other_error_attempt}). "
                                 f"Truncating messages to {max_chars} chars..."
@@ -653,6 +693,10 @@ class GeneralChatModel(BaseChatModel):
                             current_messages = truncate_messages(
                                 current_messages, max_chars=max_chars
                             )
+                            if other_error_attempt >= 3:
+                                current_messages = reduce_messages_for_payload(
+                                    current_messages, max_chars=max_chars
+                                )
                             continue  # Retry with truncated messages
                         else:
                             logging.error(
