@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .config import TracingConfig
+from .hierarchy import build_hierarchical_trace
 from .models import TraceEvent, TraceSession
-from .summarizer import generate_ai_summary
 from .yaml_utils import append_yaml_list_item, dump_yaml
 
 logger = logging.getLogger(__name__)
@@ -120,18 +120,18 @@ class TraceStore:
                         "Failed to write full run history for %s: %s", task_id, e
                     )
 
-            # Generate AI-friendly summary files
+            # Generate hierarchical trace structure
             if self.config.generate_ai_summary:
                 try:
-                    generate_ai_summary(
-                        session=session,
-                        output_dir=self.config.traces_dir,
-                        max_content_length=self.config.summary_max_content_length,
+                    hierarchical_trace = build_hierarchical_trace(session.events)
+                    hierarchy_path = self.config.traces_dir / f"{task_id}_debug.yaml"
+                    hierarchy_path.write_text(
+                        dump_yaml(hierarchical_trace), encoding="utf-8"
                     )
-                    logger.info(f"Generated AI summary for task: {task_id}")
+                    logger.info(f"Generated hierarchical debug trace for task: {task_id}")
                 except Exception as e:
                     logger.warning(
-                        "Failed to generate AI summary for %s: %s", task_id, e
+                        "Failed to generate hierarchical trace for %s: %s", task_id, e
                     )
 
             logger.info(f"Finalized trace session: {task_id}")

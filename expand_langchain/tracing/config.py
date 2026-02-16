@@ -43,8 +43,8 @@ class TracingConfig:
         write_json: Whether to write session JSON files
         write_jsonl: Whether to write event JSONL files
         write_yaml_trace: Whether to write YAML trace events
-        generate_ai_summary: Whether to generate AI-friendly summary files
-        summary_max_content_length: Maximum content length in summary files
+        generate_ai_summary: Whether to generate hierarchical debug trace (task_id_debug.yaml)
+        summary_max_content_length: (Deprecated, not used)
         event_types: Allowed event types to record (default excludes chain_start)
     """
 

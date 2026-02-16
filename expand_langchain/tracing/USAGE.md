@@ -4,82 +4,152 @@ LangGraph/LangChain 기반 SQL 생성 파이프라인을 위한 로컬 트레이
 
 ## 기능
 
-1. **로컬 Trace 저장**: JSON/JSONL/YAML 형식으로 각 LLM 호출, 도구 실행, 상태 변화 저장
-2. **실시간 모니터링**: `tail -f`로 볼 수 있는 로그 파일
+1. **로컬 Trace 저장**: YAML 형식으로  LLM 호출, 도구 실행, 상태 변화 저장
+2. **실시간 모니터링**: Trace 파일은 실시간으로 업데이트
 3. **Trace 뷰어**: 생성 완료 후 trace를 보기 좋게 출력하는 CLI 도구
-4. **AI 친화적 요약 (NEW)**: 외부 AI agent가 디버깅하기 쉽도록 Markdown 리포트 자동 생성
+4. **계층적 Debug Trace (NEW)**: AI agent가 디버깅하기 쉬운 구조화된 trace 자동 생성
 
-## 사용법
+## NEW: 계층적 Debug Trace
+
+    평탄한 이벤트 리스트 대신, **계층적으로 구조화된 trace**를 자동 생성합니다.
+
+### 주요 개선사항
+
+1. **계층적 실행 트리**
+   - 부모-자식 관계가 명확한 트리 구조
+   - 각 노드의 실행 순서와 중첩 관계 명시적 표현
+
+2. **LLM 호출 통합**
+   - start/end 이벤트를 하나의 `llm_call`로 통합
+   - 입력 메시지와 출력이 함께 저장
+   - 모델명, 실행 시간, 노드 위치 포함
+
+3. **에러 컨텍스트**
+   - 에러 발생 위치와 전체 스택 명시
+   - 에러가 발생한 노드의 입출력 보존
+
+4. **실행 메타데이터**
+   - 전체 LLM 호출 수, 에러 수 요약
+   - 각 노드의 실행 시간 (duration_ms)
+   - 노드 타입 (llm_call, graph_node, tool, chain)
+
+### 사용법
+
+```python
+from expand_langchain.generator import Generator
+
+generator = Generator(
+    config_name="ours",
+    dataset_name="spider2",
+    tracing_on=True,           # 트레이싱 활성화
+    tracing_ai_summary=True,   # 계층적 trace 생성 (NEW)
+)
+
+generator.run(n=10)
+```
+
+### 저장 위치
+
+```
+results/<run-name>/
+ results/          # 기존 결과 파일
+ checkpoints/      # LangGraph 체크포인트
+ traces/           # 트레이싱 데이터
+    ├── trace.yaml               # 원본 이벤트 trace (평탄한 리스트)
+    ├── <task_id>_trace.yaml     # Task별 원본 trace
+    ├── <task_id>_debug.yaml     # Task별 계층적 debug trace (NEW)
+    └── <task_id>_full_run_histories.yaml  # 실행 히스토리
+```
+
+### 출력 예
+
+`0_debug.yaml`:
+```yaml
+task_id: '0'
+start_time: '2026-01-27T01:50:01.805643'
+end_time: '2026-01-27T01:53:29.957009'
+total_events: 140
+llm_calls: 10
+errors: 11
+execution:
+- type: chain
+  name: chain
+  start: '2026-01-27T01:50:01.805643'
+  status: success
+  steps:
+  - type: graph_node
+    name: exploration_agent
+    graph_node: exploration_agent
+    start: '2026-01-27T01:50:01.817476'
+    end: '2026-01-27T01:50:25.842088'
+    duration_ms: 24024.612
+    status: success
+    steps:
+    - type: llm_call
+      name: ChatOpenAI
+      graph_node: exploration_agent
+      start: '2026-01-27T01:50:02.941335'
+      end: '2026-01-27T01:50:25.784686'
+      duration_ms: 22843.38
+      status: success
+      llm:
+        model: claude-3-5-sonnet
+        input_messages:
+        - type: system
+          content: |
+            # Output Format
+            First, reason through the problem step-by-step...
+        - type: human
+          content: |
+            Table: WEATHER.HISTORY_DAY
+            Columns: POSTAL_CODE, DATE, SNOWFALL...
+        output: |
+          Let me explore this database...
+          ```json
+          {"sql_queries": [...]}
+          ```
+```
+
+### AI Agent에게 유용한 이유
+
+1. **즉시 이해 가능**: 트리 구조로 전체 실행 흐름을 한눈에 파악
+2. **LLM 디버깅 쉬움**: 각 LLM 호출의 입력/출력이 한 곳에 모여 있어 생성 결과 검토 용이
+3. **에러 추적 간편**: 에러 발생 위치와 컨텍스트가 명확
+4. **파싱 용이**: 구조화된 YAML이라 프로그램으로 파싱/분석 쉬움
+5. **성능 분석**: duration_ms로 어느 노드가 느린지 즉시 파악
+
+## 기존 기능
 
 ### 1. Generator와 함께 사용
 
 ```python
 from expand_langchain.generator import Generator
 
-# tracing_on=True로 로컬 트레이싱 활성화
 generator = Generator(
     config_name="ours",
     dataset_name="spider2",
-    tracing_on=True,           # 트레이싱 활성화
-    tracing_realtime=True,     # 실시간 로그 활성화
-    tracing_max_content_length=10000,  # 최대 컨텐츠 길이
-    tracing_ai_summary=True,   # AI 친화적 요약 생성 (NEW)
+    tracing_on=True,
+    tracing_ai_summary=True,  # 계층적 debug trace 생성
 )
 
 generator.run(n=5)
 ```
 
-실행하면 다음과 같은 메시지가 출력됩니다:
-```
-TRACING: Realtime log at results/<run-name>/traces/realtime.log
-TRACING: Use 'tail -f results/<run-name>/traces/realtime.log' to monitor
-```
-
-### 2. 실시간 모니터링
-
-다른 터미널에서:
-```bash
-tail -f results/<run-name>/traces/realtime.log
-```
-
-### 3. Trace 뷰어 사용
-
-```bash
-# 전체 요약 보기
-uv run python -m expand_langchain.tracing results/<run-name>/traces/ --summary
-
-# 특정 task의 이벤트 보기
-uv run python -m expand_langchain.tracing results/<run-name>/traces/ --task-id task_0
-
-# 상세 출력 (입출력 포함)
-uv run python -m expand_langchain.tracing results/<run-name>/traces/ --task-id task_0 --verbose
-
-# 실시간 로그 watch
-uv run python -m expand_langchain.tracing results/<run-name>/traces/ --watch
-
-# JSON 형식 출력
-uv run python -m expand_langchain.tracing results/<run-name>/traces/ --json
-```
-
-### 4. 직접 Callback 사용
+### 2. 직접 Callback 사용
 
 ```python
 from expand_langchain.tracing import LocalTraceCallback, TracingConfig
 
-# 설정 생성
 config = TracingConfig(
     run_name="my-run",
     results_dir="results",
-    enable_realtime_log=True,
     log_llm_io=True,
     log_tool_io=True,
     log_graph_state=True,
     max_content_length=10000,
-    generate_ai_summary=True,         # AI 친화적 요약 생성
-    summary_max_content_length=5000,  # 요약 파일 최대 컨텐츠 길이
+    generate_ai_summary=True,         # 계층적 debug trace 생성
 )
 
-# 콜백 생성
 callback = LocalTraceCallback(config)
 
 # LangGraph/LangChain에서 사용
@@ -88,71 +158,8 @@ result = await graph.ainvoke(
     config={"callbacks": [callback]}
 )
 
-# 완료 후 정리
+# 완료  정리
 callback.finalize_all()
-```
-
-## 저장 위치
-
-```
-results/<run-name>/
-├── results/          # 기존 결과 파일
-├── checkpoints/      # LangGraph 체크포인트
-└── traces/           # 트레이싱 데이터
-    ├── realtime.log  # 실시간 로그 (tail -f용)
-    ├── trace.yaml    # YAML 형식 trace (기본)
-    ├── task_0.jsonl  # task별 이벤트 (append-only)
-    ├── task_0.json   # task별 전체 세션 (완료 후)
-    │
-    # AI-friendly summary files (NEW)
-    ├── task_0_SUMMARY.md         # 전체 실행 요약
-    ├── task_0_LLM_CALLS.md       # LLM 호출 상세
-    ├── task_0_ERROR_ANALYSIS.md  # 에러 분석 (있는 경우)
-    ├── task_0_DEBUG_GUIDE.md     # 디버깅 가이드
-    └── task_0_summary.json       # 구조화된 요약 (AI 파싱용)
-```
-
-## AI 친화적 요약 기능 (NEW)
-
-task 완료 시 자동으로 5개의 요약 파일이 생성됩니다:
-
-### 1. SUMMARY.md - 전체 실행 흐름 요약
-- Task 상태 (Success/Failed)
-- 실행 시간, LLM 호출 횟수, 에러 개수
-- 계층적 실행 트리 (어떤 노드가 어떤 순서로 실행되었는지)
-- 주요 LLM 호출 요약
-- 에러 및 복구 정보
-
-### 2. LLM_CALLS.md - LLM 호출 상세 기록
-- 각 LLM 호출의 완전한 입력 메시지 (system, user, assistant)
-- LLM 응답 전문
-- 실행 시간, 모델명, 노드 정보
-
-### 3. ERROR_ANALYSIS.md - 에러 분석
-- 각 에러의 발생 시점과 위치
-- 에러 메시지 전문
-- 에러 발생 직전의 상태 (context)
-- 에러 복구 여부 및 복구 방법
-
-### 4. DEBUG_GUIDE.md - 디버깅 가이드
-- 빠른 상태 체크
-- 디버깅 시작 방법 안내
-- 이번 실행에서 발견된 이슈 목록
-- 디버깅 팁
-
-### 5. summary.json - 구조화된 요약
-- 전체 실행 정보를 JSON 형식으로
-- AI agent가 파싱하기 쉬운 구조
-- 실행 트리, LLM 호출, 에러 정보 포함
-
-### 사용 예시
-
-```python
-# AI agent가 디버깅을 시작할 때:
-# 1. SUMMARY.md 읽어서 전체 흐름 파악
-# 2. ERROR_ANALYSIS.md로 에러 원인 분석
-# 3. LLM_CALLS.md로 잘못된 생성 결과 확인
-# 4. 필요시 summary.json 파싱해서 자동 분석
 ```
 
 ## 이벤트 타입
@@ -167,5 +174,5 @@ task 완료 시 자동으로 5개의 요약 파일이 생성됩니다:
 ## 주의사항
 
 1. `tracing_on=True`로 설정해야 트레이싱이 활성화됩니다.
-2. 대용량 입출력은 `tracing_max_content_length`에 따라 잘립니다.
-3. JSONL 파일은 실행 중에도 읽을 수 있지만, JSON 파일은 task 완료 후에 생성됩니다.
+2. 대용량 입출력은 `max_content_length`에 따라 잘립니다.
+3. `_debug.yaml` 파일은 task 완료 후에 생성됩니다.
