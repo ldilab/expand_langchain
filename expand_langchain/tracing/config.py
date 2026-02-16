@@ -43,6 +43,8 @@ class TracingConfig:
         write_json: Whether to write session JSON files
         write_jsonl: Whether to write event JSONL files
         write_yaml_trace: Whether to write YAML trace events
+        generate_ai_summary: Whether to generate AI-friendly summary files
+        summary_max_content_length: Maximum content length in summary files
         event_types: Allowed event types to record (default excludes chain_start)
     """
 
@@ -58,6 +60,8 @@ class TracingConfig:
     write_json: bool = False
     write_jsonl: bool = False
     write_yaml_trace: bool = True
+    generate_ai_summary: bool = True
+    summary_max_content_length: int = 5000
     event_types: Optional[Set[str]] = field(default_factory=_default_event_types)
 
     # Internal fields

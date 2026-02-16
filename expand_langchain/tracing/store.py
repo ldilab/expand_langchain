@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .config import TracingConfig
 from .models import TraceEvent, TraceSession
+from .summarizer import generate_ai_summary
 from .yaml_utils import append_yaml_list_item, dump_yaml
 
 logger = logging.getLogger(__name__)
@@ -117,6 +118,20 @@ class TraceStore:
                 except Exception as e:
                     logger.warning(
                         "Failed to write full run history for %s: %s", task_id, e
+                    )
+
+            # Generate AI-friendly summary files
+            if self.config.generate_ai_summary:
+                try:
+                    generate_ai_summary(
+                        session=session,
+                        output_dir=self.config.traces_dir,
+                        max_content_length=self.config.summary_max_content_length,
+                    )
+                    logger.info(f"Generated AI summary for task: {task_id}")
+                except Exception as e:
+                    logger.warning(
+                        "Failed to generate AI summary for %s: %s", task_id, e
                     )
 
             logger.info(f"Finalized trace session: {task_id}")
