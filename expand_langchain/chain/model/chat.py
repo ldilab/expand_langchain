@@ -15,24 +15,17 @@ from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
+from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
+                                     SystemMessage)
+from langchain_core.output_parsers import (JsonOutputParser,
+                                           PydanticOutputParser)
 from langchain_core.outputs import ChatResult
-from langchain_core.runnables import (
-    Runnable,
-    RunnableLambda,
-    RunnableMap,
-    RunnablePassthrough,
-)
+from langchain_core.runnables import (Runnable, RunnableLambda, RunnableMap,
+                                      RunnablePassthrough)
 from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import BaseModel
-from tenacity import (
-    retry,
-    retry_if_exception,
-    retry_if_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
+from tenacity import (retry, retry_if_exception, retry_if_exception_type,
+                      stop_after_attempt, wait_exponential)
 
 
 def _get_message_role(msg: BaseMessage) -> str:
@@ -75,6 +68,18 @@ def extract_json_from_text(text: str) -> str:
     match = re.search(json_block_pattern, text, re.DOTALL | re.IGNORECASE)
     if match:
         return match.group(1).strip()
+
+    # Strategy 1b: Try unclosed ```json code block at end of text
+    unclosed_json_pattern = r"```json\s*\n([\s\S]+)$"
+    match = re.search(unclosed_json_pattern, text)
+    if match:
+        candidate = match.group(1).strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                json.loads(candidate)
+                return candidate
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     # Strategy 2: Try to find JSON in any ``` code blocks
     code_block_pattern = r"```\s*\n(.*?)\n```"
@@ -150,31 +155,53 @@ class LenientOutputParser:
 
     @staticmethod
     def _validate_json_codeblock(text: str) -> None:
-        """Require a single JSON code block as the final response."""
+        """Require a single JSON code block as the final response.
+
+        Accepts both properly closed (```json ... ```) and unclosed
+        (```json ... EOF) code blocks where the JSON itself is complete.
+        """
         stripped = (text or "").strip()
         if not stripped:
             return
 
+        # Try closed code block first
         codeblock_pattern = r"```json\s*\n[\s\S]*?\n```"
         matches = list(re.finditer(codeblock_pattern, stripped))
-        if len(matches) != 1:
-            raise ValueError(
-                "CRITICAL: Output must contain exactly one ```json ...``` code block."
-            )
 
-        match = matches[0]
-        before = stripped[: match.start()]
-        after = stripped[match.end() :]
+        if len(matches) == 1:
+            match = matches[0]
+            before = stripped[: match.start()]
+            after = stripped[match.end() :]
 
-        if "```" in before or "```" in after:
-            raise ValueError(
-                "CRITICAL: Only one JSON code block is allowed. Remove other code blocks."
-            )
+            if "```" in before or "```" in after:
+                raise ValueError(
+                    "CRITICAL: Only one JSON code block is allowed. Remove other code blocks."
+                )
 
-        if after.strip():
-            raise ValueError(
-                "CRITICAL: JSON code block must be the final content (no text after)."
-            )
+            if after.strip():
+                raise ValueError(
+                    "CRITICAL: JSON code block must be the final content (no text after)."
+                )
+            return
+
+        # Accept unclosed code block at end of output (model omitted closing ```)
+        unclosed_pattern = r"```json\s*\n([\s\S]+)$"
+        unclosed_match = re.search(unclosed_pattern, stripped)
+        if unclosed_match:
+            before = stripped[: unclosed_match.start()]
+            # No other code blocks allowed before
+            if "```" in before:
+                raise ValueError(
+                    "CRITICAL: Only one JSON code block is allowed. Remove other code blocks."
+                )
+            # Validate that the unclosed block contains plausible JSON
+            body = unclosed_match.group(1).strip()
+            if body.startswith("{") and body.endswith("}"):
+                return
+
+        raise ValueError(
+            "CRITICAL: Output must contain exactly one ```json ...``` code block."
+        )
 
 
 def validate_message_sequence(messages: List[BaseMessage]) -> None:
