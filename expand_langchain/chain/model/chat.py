@@ -164,8 +164,8 @@ class LenientOutputParser:
         if not stripped:
             return
 
-        # Try closed code block first
-        codeblock_pattern = r"```json\s*\n[\s\S]*?\n```"
+        # Try closed code block first (allow closing ``` on same line as content)
+        codeblock_pattern = r"```json\s*\n[\s\S]*?```"
         matches = list(re.finditer(codeblock_pattern, stripped))
 
         if len(matches) == 1:
