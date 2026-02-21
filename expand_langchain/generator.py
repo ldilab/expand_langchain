@@ -1,4 +1,5 @@
 import asyncio
+import importlib
 import json
 import logging
 import os
@@ -6,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from traceback import format_exc
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 from langchain_core.runnables import Runnable
 from langgraph.checkpoint.memory import InMemorySaver
@@ -54,6 +55,11 @@ class Generator(BaseModel):
     tracing_write_json: bool = False
     tracing_write_jsonl: bool = False
 
+    # Method-specific custom tracing (structured per-method summaries)
+    method_trace_on: bool = True
+    method_trace_provider: str = "medsql.tracing.method_trace:build_method_trace"
+    method_trace_max_llm_events: int = 80
+
     # private variables
     root_node: Optional[Runnable] = None
     output_dir: Optional[Path] = None
@@ -63,6 +69,7 @@ class Generator(BaseModel):
     # tracing internals
     _trace_store: Any = None
     _tracing_config: Any = None
+    _method_trace_builder: Optional[Callable[..., Any]] = None
 
     # pydantic config
     class Config:
@@ -83,6 +90,7 @@ class Generator(BaseModel):
             "rerun",
             "debug",
             "verbose",
+            "method_trace_on",
         ]:
             if bool_field in data and isinstance(data[bool_field], str):
                 data[bool_field] = data[bool_field].lower() in ("true", "1", "yes")
@@ -122,6 +130,44 @@ class Generator(BaseModel):
 
         if self.tracing_on:
             self._init_tracing()
+
+        self._method_trace_builder = self._load_method_trace_builder()
+
+    def _load_method_trace_builder(self) -> Optional[Callable[..., Any]]:
+        """Load method-specific trace builder from dotted import path.
+
+        Expected format: 'module.path:function_name'.
+        """
+        if not self.method_trace_on:
+            return None
+
+        provider = (self.method_trace_provider or "").strip()
+        if not provider:
+            return None
+
+        if ":" not in provider:
+            logging.warning(
+                "Invalid method_trace_provider '%s' (expected module:function)",
+                provider,
+            )
+            return None
+
+        module_name, func_name = provider.split(":", 1)
+        try:
+            module = importlib.import_module(module_name)
+            builder = getattr(module, func_name)
+            if not callable(builder):
+                logging.warning(
+                    "method_trace_provider target is not callable: %s",
+                    provider,
+                )
+                return None
+            return builder
+        except Exception as e:
+            logging.warning(
+                "Failed to load method trace provider '%s': %s", provider, e
+            )
+            return None
 
     def _init_tracing(self):
         logging.debug(
@@ -192,6 +238,119 @@ class Generator(BaseModel):
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         if not self.cache_root and not self.rerun:
             self.cache_root = self.result_root
+
+    def _infer_method_name(self, result: Any) -> str:
+        """Infer method name from config name and result shape."""
+        cfg = (self.config_name or "").lower()
+        for method in ["glow", "atomic", "spider", "reforce"]:
+            if (
+                f"_{method}_" in cfg
+                or cfg.startswith(f"{method}_")
+                or f"-{method}-" in cfg
+            ):
+                return method
+
+        if isinstance(result, dict):
+            if "trajectory_archive" in result:
+                return "glow"
+            if "agent_depth" in result or "plan_stack" in result:
+                return "atomic"
+        return "unknown"
+
+    def _emit_method_trace(
+        self,
+        task_id: str,
+        target: dict,
+        result: Any,
+    ) -> None:
+        """Build and emit method-specific structured trace output."""
+        if not self.method_trace_on or self._method_trace_builder is None:
+            return
+
+        method_name = self._infer_method_name(result)
+        trace_session = None
+        if self._trace_store is not None:
+            try:
+                trace_session = self._trace_store.get_session(task_id)
+            except Exception:
+                trace_session = None
+
+        try:
+            payload = self._method_trace_builder(
+                method=method_name,
+                task_id=task_id,
+                target=target,
+                result=result,
+                config_name=self.config_name,
+                run_name=self.run_name,
+                trace_session=trace_session,
+                max_llm_events=max(1, int(self.method_trace_max_llm_events)),
+            )
+        except Exception as e:
+            logging.debug("Method trace builder failed for task %s: %s", task_id, e)
+            return
+
+        if not payload:
+            return
+
+        # Write a compact per-task method trace YAML
+        try:
+            if self.output_dir:
+                traces_dir = self.output_dir / "traces"
+                traces_dir.mkdir(parents=True, exist_ok=True)
+                path = traces_dir / f"{task_id}_method_trace.yaml"
+                safe_payload = json.loads(
+                    json.dumps(payload, ensure_ascii=False, default=str)
+                )
+                misc.pretty_yaml_dump(safe_payload, path)
+        except Exception as e:
+            logging.warning(
+                "Failed to write method trace file for task %s: %s",
+                task_id,
+                e,
+            )
+            try:
+                if self.output_dir:
+                    traces_dir = self.output_dir / "traces"
+                    traces_dir.mkdir(parents=True, exist_ok=True)
+                    path = traces_dir / f"{task_id}_method_trace.yaml"
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(
+                            json.dumps(
+                                payload, ensure_ascii=False, indent=2, default=str
+                            )
+                        )
+            except Exception as fallback_error:
+                logging.warning(
+                    "Fallback write also failed for method trace task %s: %s",
+                    task_id,
+                    fallback_error,
+                )
+
+        # Also append as CUSTOM event to unified trace stream when available
+        if self._trace_store is not None:
+            try:
+                from .tracing.models import TraceEvent, TraceEventType
+
+                custom_event = TraceEvent(
+                    event_type=TraceEventType.CUSTOM,
+                    timestamp=datetime.now(),
+                    run_id=f"method_trace_{task_id}_{int(time.time() * 1000)}",
+                    parent_run_id=None,
+                    name="method_trace",
+                    inputs=None,
+                    outputs={"method_trace": payload},
+                    metadata={"method": method_name, "source": "generator"},
+                    error=None,
+                    duration_ms=None,
+                    task_id=task_id,
+                    tags=["method-trace", method_name],
+                )
+                self._trace_store.add_event(custom_event)
+            except Exception as e:
+                logging.debug(
+                    "Failed to add method trace custom event for %s: %s", task_id, e
+                )
 
     def run(
         self,
@@ -522,6 +681,11 @@ class Generator(BaseModel):
 
                 if self.debug and not is_recursion_error:
                     raise e
+
+            try:
+                self._emit_method_trace(id, target, result)
+            except Exception as e:
+                logging.debug(f"Failed to emit method trace for {id}: {e}")
 
             finally:
                 if local_trace_callback is not None:
