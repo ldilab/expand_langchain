@@ -15,17 +15,24 @@ from langchain.chat_models import init_chat_model
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.base import LanguageModelInput
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import (AIMessage, BaseMessage, HumanMessage,
-                                     SystemMessage)
-from langchain_core.output_parsers import (JsonOutputParser,
-                                           PydanticOutputParser)
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.output_parsers import JsonOutputParser, PydanticOutputParser
 from langchain_core.outputs import ChatResult
-from langchain_core.runnables import (Runnable, RunnableLambda, RunnableMap,
-                                      RunnablePassthrough)
+from langchain_core.runnables import (
+    Runnable,
+    RunnableLambda,
+    RunnableMap,
+    RunnablePassthrough,
+)
 from langchain_core.utils.pydantic import is_basemodel_subclass
 from pydantic import BaseModel
-from tenacity import (retry, retry_if_exception, retry_if_exception_type,
-                      stop_after_attempt, wait_exponential)
+from tenacity import (
+    retry,
+    retry_if_exception,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 
 def _get_message_role(msg: BaseMessage) -> str:
@@ -697,6 +704,32 @@ class GeneralChatModel(BaseChatModel):
                         logging.error(f"Content filter triggered: {e}")
                         raise
 
+                    # Invalid message role sequence - strict API rejection
+                    # (e.g., Snowflake Cortex). Try reducing messages or raise immediately.
+                    if "invalid message role sequence" in error_msg:
+                        msg_roles = [_get_message_role(m) for m in current_messages]
+                        logging.warning(
+                            f"API rejected message role sequence (attempt {other_error_attempt}). "
+                            f"Roles: {msg_roles}, Count: {len(current_messages)}"
+                        )
+                        # Try reducing to system + last user message only
+                        if other_error_attempt >= 3:
+                            logging.error(
+                                f"Persistent 'invalid message role sequence' after "
+                                f"{other_error_attempt} attempts. Raising."
+                            )
+                            raise
+                        # Attempt truncation to reduce message count
+                        if len(current_messages) > 4:
+                            current_messages = reduce_messages_for_payload(
+                                current_messages, max_chars=16000
+                            )
+                            logging.warning(
+                                f"Reduced messages to {len(current_messages)} for retry."
+                            )
+                            continue
+                        raise
+
                     # Payload too large / max tokens errors - try truncating
                     if any(
                         phrase in error_msg
@@ -907,14 +940,44 @@ class GeneralChatModel(BaseChatModel):
             messages: Union[List[BaseMessage], LanguageModelInput],
             max_parsing_retries: int = parsing_retries,
         ):
-            """Invoke LLM with automatic retry on parsing failures."""
+            """Invoke LLM with automatic retry on parsing failures.
+
+            Uses a REPLACE-not-accumulate strategy for retry messages:
+            Each retry replaces the previous retry's [AI, Human] pair rather than
+            appending additional pairs. This prevents message count growth that
+            can cause "invalid message role sequence" errors on strict APIs
+            (e.g., Snowflake Cortex).
+            """
             from langchain_core.messages import AIMessage, HumanMessage
 
-            current_messages = add_format_instructions_to_messages(messages)
+            base_messages = add_format_instructions_to_messages(messages)
+            current_messages = base_messages
 
             for attempt in range(1, max_parsing_retries + 1):
                 # Invoke LLM
-                response = self.invoke(current_messages)
+                try:
+                    response = self.invoke(current_messages)
+                except Exception as api_error:
+                    # If the API call itself fails (e.g., "invalid message role sequence"
+                    # from strict APIs like Snowflake Cortex when retry messages were added),
+                    # fall back to base messages without retry context.
+                    error_msg_lower = str(api_error).lower()
+                    if "invalid message role sequence" in error_msg_lower and len(
+                        current_messages
+                    ) > len(base_messages):
+                        logging.warning(
+                            f"Parsing retry attempt {attempt}: API rejected expanded messages "
+                            f"({len(current_messages)} msgs). Falling back to base messages "
+                            f"({len(base_messages)} msgs)."
+                        )
+                        current_messages = base_messages
+                        try:
+                            response = self.invoke(current_messages)
+                        except Exception:
+                            # If base messages also fail, re-raise original error
+                            raise api_error
+                    else:
+                        raise
 
                 # Try to parse the response
                 try:
@@ -1003,16 +1066,16 @@ class GeneralChatModel(BaseChatModel):
                         f"Retrying with format reminder..."
                     )
 
-                    # Build message chain for retry:
-                    # 1. Original chat history (already in current_messages with format instructions)
-                    # 2. AIMessage: The LLM's response that failed to parse
-                    # 3. HumanMessage: Error feedback + format hint
+                    # Build retry messages using REPLACE strategy:
+                    # Always start from base_messages and add exactly ONE [AI, Human] pair.
+                    # This prevents message count growth that breaks strict APIs
+                    # (e.g., Snowflake Cortex rejects growing message chains).
                     response_content = (
                         str(response.content)
                         if hasattr(response, "content")
                         else str(response)
                     )
-                    current_messages = current_messages + [
+                    current_messages = list(base_messages) + [
                         AIMessage(content=response_content),
                         HumanMessage(content=retry_feedback),
                     ]
