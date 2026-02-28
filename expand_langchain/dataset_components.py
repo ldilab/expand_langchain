@@ -226,6 +226,19 @@ class DatasetWriter:
         processed_count = 0
         saved_count = 0
 
+        # If cache file already exists and is readable, skip re-writing
+        if os.path.exists(data_file_path) and os.access(data_file_path, os.R_OK):
+            try:
+                with open(data_file_path, "r", encoding="utf-8") as f:
+                    saved_count = sum(1 for line in f if line.strip())
+                if saved_count > 0:
+                    logger.info(
+                        f"Using existing cache file with {saved_count} samples: {data_file_path}"
+                    )
+                    return saved_count
+            except Exception:
+                pass  # Fall through to re-write
+
         with open(data_file_path, "w", encoding="utf-8") as f:
             for pk in primary_keys:
                 try:

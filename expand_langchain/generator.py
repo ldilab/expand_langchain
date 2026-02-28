@@ -41,6 +41,7 @@ class Generator(BaseModel):
     id_key: str = "task_id"  # key name for id field in dataset
 
     langfuse_on: bool = False
+    lark_on: bool = False
 
     # Local tracing (file-based) - designed to be a lightweight alternative to Langfuse
     tracing_on: bool = True
@@ -796,6 +797,9 @@ class Generator(BaseModel):
         """
         Send message to the webhook using EnvironmentConfig
         """
+        if not self.lark_on:
+            return self
+
         env_config = EnvironmentConfig(validate_on_init=False)
         webhook = env_config.lark_webhook
 
